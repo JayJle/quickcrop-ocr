@@ -67,7 +67,8 @@ From PowerShell:
 cd path\to\QuickCrop-OCR
 $env:QUICKCROP_OCR_MODE = "fast"
 $env:QUICKCROP_TESSERACT_LANG = "chi_sim+eng"
-$env:QUICKCROP_TESSERACT_PSM = "auto"
+$env:QUICKCROP_TESSERACT_SPEED = "fast"
+$env:QUICKCROP_TESSERACT_PSM = "6"
 python -m quickcrop_ocr
 ```
 
@@ -77,7 +78,8 @@ From cmd.exe:
 cd path\to\QuickCrop-OCR
 set QUICKCROP_OCR_MODE=fast
 set QUICKCROP_TESSERACT_LANG=chi_sim+eng
-set QUICKCROP_TESSERACT_PSM=auto
+set QUICKCROP_TESSERACT_SPEED=fast
+set QUICKCROP_TESSERACT_PSM=6
 python -m quickcrop_ocr
 ```
 
@@ -139,25 +141,38 @@ set QUICKCROP_TESSERACT_LANG=chi_sim+eng
 Page segmentation mode:
 
 ```cmd
-set QUICKCROP_TESSERACT_PSM=auto
+set QUICKCROP_TESSERACT_PSM=6
 ```
 
 Useful values:
 
-- `auto`: tries `6` and `11`, then picks the strongest result
+- `auto`: tries one or more modes depending on `QUICKCROP_TESSERACT_SPEED`
 - `6`: one block of text
 - `7`: one single text line
 - `11`: sparse text
 
-Preprocessing mode:
+Speed mode:
 
 ```cmd
-set QUICKCROP_TESSERACT_PREPROCESS=auto
+set QUICKCROP_TESSERACT_SPEED=fast
 ```
 
 Useful values:
 
-- `auto`: tries color, gray, binary, and inverted variants
+- `fast`: one Tesseract pass, best for daily use
+- `balanced`: a small number of fallback passes for harder screenshots
+- `thorough`: many fallback passes, slowest but best for difficult backgrounds
+
+Preprocessing mode:
+
+```cmd
+set QUICKCROP_TESSERACT_PREPROCESS=fast
+```
+
+Useful values:
+
+- `fast`: one high-contrast local OCR pass
+- `auto`: tries variants according to `QUICKCROP_TESSERACT_SPEED`
 - `color`: better for colored text or decorated backgrounds
 - `gray`: useful for low-contrast screenshots
 - `binary`: best for clean black text on a light background

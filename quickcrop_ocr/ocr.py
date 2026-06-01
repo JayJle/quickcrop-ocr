@@ -111,8 +111,9 @@ def _find_tesseract_command() -> str | None:
 
 def _recognize_with_tesseract(image: Image.Image, tesseract_command: str) -> OcrResult:
     lang = _normalize_tesseract_lang(os.getenv("QUICKCROP_TESSERACT_LANG", "chi_sim+eng"))
-    psm_values = _tesseract_psm_values(os.getenv("QUICKCROP_TESSERACT_PSM", "auto"))
-    variants = _preprocess_variants_for_tesseract(image)
+    speed = _tesseract_speed()
+    psm_values = _tesseract_psm_values(os.getenv("QUICKCROP_TESSERACT_PSM", "6"), speed)
+    variants = _preprocess_variants_for_tesseract(image, speed)
     candidates: list[TesseractCandidate] = []
 
     for psm in psm_values:
@@ -184,19 +185,33 @@ def _normalize_tesseract_lang(lang: str) -> str:
     return "+".join(chinese_first + rest)
 
 
-def _tesseract_psm_values(psm: str) -> list[str]:
+def _tesseract_speed() -> str:
+    speed = os.getenv("QUICKCROP_TESSERACT_SPEED", "fast").strip().lower()
+    if speed not in {"fast", "balanced", "thorough"}:
+        raise OcrError("QUICKCROP_TESSERACT_SPEED must be fast, balanced, or thorough")
+
+    return speed
+
+
+def _tesseract_psm_values(psm: str, speed: str) -> list[str]:
     normalized = psm.strip().lower()
     if normalized == "auto":
+        if speed == "fast":
+            return ["6"]
+        if speed == "balanced":
+            return ["6"]
         return ["6", "11"]
 
     return [value.strip() for value in normalized.replace(",", "+").split("+") if value.strip()]
 
 
-def _preprocess_variants_for_tesseract(image: Image.Image) -> list[tuple[str, Image.Image]]:
-    mode = os.getenv("QUICKCROP_TESSERACT_PREPROCESS", "auto").strip().lower()
-    if mode not in {"auto", "color", "gray", "binary", "invert"}:
-        raise OcrError("QUICKCROP_TESSERACT_PREPROCESS must be auto, color, gray, binary, or invert")
+def _preprocess_variants_for_tesseract(image: Image.Image, speed: str) -> list[tuple[str, Image.Image]]:
+    mode = os.getenv("QUICKCROP_TESSERACT_PREPROCESS", "fast").strip().lower()
+    if mode not in {"fast", "auto", "color", "gray", "binary", "invert"}:
+        raise OcrError("QUICKCROP_TESSERACT_PREPROCESS must be fast, auto, color, gray, binary, or invert")
 
+    if mode == "fast":
+        return [("binary170", _prepare_binary(image, threshold=170))]
     if mode == "color":
         return [("color", _upscale_for_tesseract(image.convert("RGB")))]
     if mode == "gray":
@@ -205,6 +220,14 @@ def _preprocess_variants_for_tesseract(image: Image.Image) -> list[tuple[str, Im
         return [("binary", _prepare_binary(image, threshold=170))]
     if mode == "invert":
         return [("invert", _prepare_inverted_binary(image))]
+
+    if speed == "fast":
+        return [("binary170", _prepare_binary(image, threshold=170))]
+    if speed == "balanced":
+        return [
+            ("gray", _prepare_gray(image)),
+            ("binary170", _prepare_binary(image, threshold=170)),
+        ]
 
     return [
         ("color", _upscale_for_tesseract(image.convert("RGB"))),
