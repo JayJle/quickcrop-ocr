@@ -9,26 +9,29 @@ Press a global shortcut, drag over text, and the recognized text is copied to th
 - Global hotkey: `Ctrl+Shift+X`
 - Full-screen crop overlay with drag selection
 - Exact region screenshot capture
-- Local OCR with Tesseract
-- Simplified Chinese + English OCR by default
-- Optional OpenAI vision backend for higher-accuracy OCR
+- Gemini vision OCR through the Gemini API
+- Stronger recognition for Chinese, English, mixed text, UI screenshots, subtitles, and decorative backgrounds
 - Automatic clipboard copy
 - Small success/failure notifications
 - No permanent screenshot storage
+
+## Why Gemini OCR
+
+Tesseract is very fast for clean document-style text, but it struggles with mixed Chinese/English, stylized fonts, shadows, low contrast, and text over images.
+
+QuickCrop OCR uses one Gemini vision pipeline instead of multiple local OCR modes. This keeps the app simpler and usually improves accuracy on real screenshots. The tradeoff is that OCR requires internet access, uses API credits, and sends the selected crop to Google Gemini.
+
+Gemini's image understanding docs describe passing inline image data to `generateContent`:
+
+```text
+https://ai.google.dev/gemini-api/docs/vision
+```
 
 ## Requirements
 
 - Windows
 - Python 3.10+
-- Tesseract OCR for local OCR
-
-The app auto-detects Tesseract at:
-
-```text
-C:\Program Files\Tesseract-OCR\tesseract.exe
-```
-
-If Tesseract is installed somewhere else, set `QUICKCROP_TESSERACT_EXE`.
+- A Gemini API key
 
 ## Installation
 
@@ -40,35 +43,13 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Install Tesseract for Windows from the UB Mannheim build:
-
-```text
-https://github.com/UB-Mannheim/tesseract/wiki
-```
-
-During installation, include the languages you need. For Chinese + English, make sure these are available:
-
-```text
-chi_sim
-eng
-```
-
-You can verify with:
-
-```cmd
-"C:\Program Files\Tesseract-OCR\tesseract.exe" --list-langs
-```
-
 ## Run
 
 From PowerShell:
 
 ```powershell
 cd path\to\QuickCrop-OCR
-$env:QUICKCROP_OCR_MODE = "fast"
-$env:QUICKCROP_TESSERACT_LANG = "chi_sim+eng"
-$env:QUICKCROP_TESSERACT_SPEED = "fast"
-$env:QUICKCROP_TESSERACT_PSM = "6"
+$env:GEMINI_API_KEY = "your-gemini-api-key"
 python -m quickcrop_ocr
 ```
 
@@ -76,10 +57,7 @@ From cmd.exe:
 
 ```cmd
 cd path\to\QuickCrop-OCR
-set QUICKCROP_OCR_MODE=fast
-set QUICKCROP_TESSERACT_LANG=chi_sim+eng
-set QUICKCROP_TESSERACT_SPEED=fast
-set QUICKCROP_TESSERACT_PSM=6
+set GEMINI_API_KEY=your-gemini-api-key
 python -m quickcrop_ocr
 ```
 
@@ -94,135 +72,65 @@ Keep the terminal open while the app is running. Press `Ctrl+C` in the terminal 
 
 Press `Esc` during selection to cancel.
 
-## OCR Modes
+## Optional Settings
 
-`fast` uses local Tesseract OCR:
-
-```cmd
-set QUICKCROP_OCR_MODE=fast
-```
-
-`accurate` uses OpenAI vision OCR:
+Default Gemini model:
 
 ```cmd
-set QUICKCROP_OCR_MODE=accurate
-set OPENAI_API_KEY=sk-...
+set QUICKCROP_GEMINI_MODEL=gemini-2.5-flash
 ```
 
-`auto` tries Tesseract first, then OpenAI if available:
+Output format:
 
 ```cmd
-set QUICKCROP_OCR_MODE=auto
+set QUICKCROP_OUTPUT_FORMAT=preserve
 ```
 
-The OpenAI backend sends a base64 image data URL to the Responses API, following the official OpenAI image input pattern:
+Available values:
+
+- `preserve`: keep line breaks, paragraphs, code indentation, and table-like layout as much as Gemini returns them
+- `single_line`: collapse the OCR result into one line
+
+By default, QuickCrop OCR adds a space after punctuation when the next character is not already whitespace:
 
 ```text
-https://platform.openai.com/docs/guides/images-vision
+Hello,world!Next sentence.
 ```
 
-Optional OpenAI settings:
+becomes:
+
+```text
+Hello, world! Next sentence.
+```
+
+Disable it with:
 
 ```cmd
-set QUICKCROP_OPENAI_MODEL=gpt-4.1-mini
-set QUICKCROP_OPENAI_DETAIL=high
+set QUICKCROP_SPACE_AFTER_PUNCTUATION=0
 ```
-
-## Tesseract Settings
-
-Default language:
-
-```cmd
-set QUICKCROP_TESSERACT_LANG=chi_sim+eng
-```
-
-`chi_sim+eng` is preferred over `eng+chi_sim` because Tesseract language order affects mixed Chinese/English recognition.
-
-Page segmentation mode:
-
-```cmd
-set QUICKCROP_TESSERACT_PSM=6
-```
-
-Useful values:
-
-- `auto`: tries one or more modes depending on `QUICKCROP_TESSERACT_SPEED`
-- `6`: one block of text
-- `7`: one single text line
-- `11`: sparse text
-
-Speed mode:
-
-```cmd
-set QUICKCROP_TESSERACT_SPEED=fast
-```
-
-Useful values:
-
-- `fast`: one Tesseract pass, best for daily use
-- `balanced`: a small number of fallback passes for harder screenshots
-- `thorough`: many fallback passes, slowest but best for difficult backgrounds
-
-Preprocessing mode:
-
-```cmd
-set QUICKCROP_TESSERACT_PREPROCESS=fast
-```
-
-Useful values:
-
-- `fast`: one high-contrast local OCR pass
-- `auto`: tries variants according to `QUICKCROP_TESSERACT_SPEED`
-- `color`: better for colored text or decorated backgrounds
-- `gray`: useful for low-contrast screenshots
-- `binary`: best for clean black text on a light background
-- `invert`: useful for white text on a dark background
 
 ## Troubleshooting
 
-If English works but Chinese does not:
+If the app says `GEMINI_API_KEY is not set`, set your API key in the same terminal before starting the app.
 
-- Use `chi_sim+eng`, not `eng+chi_sim`.
+If OCR is slow:
+
+- Crop only the text area you need.
+- Avoid selecting huge screen regions.
+- Crop only the text area rather than a full screen.
+
+If OCR is inaccurate:
+
 - Crop slightly wider and taller than the visible text.
-- Avoid tiny or heavily anti-aliased characters when possible.
-- Confirm `chi_sim` appears in `tesseract --list-langs`.
-
-If OCR returns no text, save the processed image that Tesseract receives:
-
-```cmd
-set QUICKCROP_DEBUG_IMAGE=%TEMP%\quickcrop-debug.png
-python -m quickcrop_ocr
-```
-
-After a capture, open files like:
-
-```text
-%TEMP%\quickcrop-debug-color-psm6.png
-%TEMP%\quickcrop-debug-gray-psm11.png
-```
-
-For decorative backgrounds, gradients, shadows, stylized Chinese fonts, or screenshots with text over images, local Tesseract may still misread similar Chinese characters. Use OpenAI mode for higher accuracy:
-
-```cmd
-set QUICKCROP_OCR_MODE=accurate
-set OPENAI_API_KEY=sk-...
-python -m quickcrop_ocr
-```
-
-If `tesseract` is not on `PATH`, either install it to the default location or set:
-
-```cmd
-set QUICKCROP_TESSERACT_EXE=C:\Program Files\Tesseract-OCR\tesseract.exe
-```
+- Make sure the selected image is clear enough for a human to read.
 
 ## Privacy
 
 - Screenshots are held in memory by default.
-- Tesseract OCR runs locally.
-- Temporary files used for Tesseract are deleted immediately after OCR.
-- Clipboard content remains local.
-- OpenAI mode sends the selected crop to the OpenAI API.
+- The selected crop is sent to the Gemini API for OCR.
+- Clipboard content remains local after OCR returns.
+- No screenshot files are saved permanently by default.
 
 ## Project Status
 
-This is a personal-use MVP. It is currently optimized for Windows and local Chinese/English OCR through Tesseract.
+This is a personal-use MVP optimized for quick Gemini-powered screenshot OCR on Windows.

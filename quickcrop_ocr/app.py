@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import queue
 import signal
-import sys
 import threading
 import tkinter as tk
 import ctypes
@@ -101,13 +100,19 @@ class QuickCropApp:
         try:
             result = recognize_text(image)
         except NoOcrBackendError as exc:
-            self.root.after(0, lambda: self._show_toast(str(exc), is_error=True))
+            message = str(exc)
+            print(message)
+            self.root.after(0, lambda message=message: self._show_toast(message, is_error=True))
             return
         except OcrError as exc:
-            self.root.after(0, lambda: self._show_toast(f"OCR failed: {exc}", is_error=True))
+            message = f"OCR failed: {exc}"
+            print(message)
+            self.root.after(0, lambda message=message: self._show_toast(message, is_error=True))
             return
         except Exception as exc:  # Defensive boundary for a long-running utility.
-            self.root.after(0, lambda: self._show_toast(f"Unexpected OCR error: {exc}", is_error=True))
+            message = f"Unexpected OCR error: {exc}"
+            print(message)
+            self.root.after(0, lambda message=message: self._show_toast(message, is_error=True))
             return
 
         self.root.after(0, lambda: self._copy_result(result))
