@@ -52,6 +52,13 @@ class NoOcrBackendError(OcrError):
     pass
 
 
+@dataclass(frozen=True)
+class TesseractCandidate:
+    text: str
+    confidence: float
+    variant: str
+
+
 def recognize_text(image: Image.Image) -> OcrResult:
     mode = os.getenv("QUICKCROP_OCR_MODE", "auto").strip().lower()
     if mode not in {"auto", "fast", "accurate"}:
@@ -104,16 +111,39 @@ def _find_tesseract_command() -> str | None:
 
 def _recognize_with_tesseract(image: Image.Image, tesseract_command: str) -> OcrResult:
     lang = _normalize_tesseract_lang(os.getenv("QUICKCROP_TESSERACT_LANG", "chi_sim+eng"))
-    psm = os.getenv("QUICKCROP_TESSERACT_PSM", "6")
-    processed = _preprocess_for_tesseract(image)
+    psm_values = _tesseract_psm_values(os.getenv("QUICKCROP_TESSERACT_PSM", "auto"))
+    variants = _preprocess_variants_for_tesseract(image)
+    candidates: list[TesseractCandidate] = []
+
+    for psm in psm_values:
+        for variant_name, processed in variants:
+            candidates.append(
+                _run_tesseract_candidate(tesseract_command, processed, lang, psm, f"{variant_name}-psm{psm}")
+            )
+
+    valid_candidates = [candidate for candidate in candidates if candidate.text.strip()]
+    if not valid_candidates:
+        return OcrResult(text="[NO_TEXT_DETECTED]", backend="tesseract")
+
+    best = max(valid_candidates, key=_score_tesseract_candidate)
+    return OcrResult(text=best.text.strip(), backend=f"tesseract:{best.variant}")
+
+
+def _run_tesseract_candidate(
+    tesseract_command: str,
+    image: Image.Image,
+    lang: str,
+    psm: str,
+    variant_name: str,
+) -> TesseractCandidate:
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         temp_path = tmp.name
 
     try:
-        processed.save(temp_path, "PNG")
-        _maybe_save_debug_image(processed)
+        image.save(temp_path, "PNG")
+        _maybe_save_debug_image(image, variant_name)
         process = subprocess.run(
-            [tesseract_command, temp_path, "stdout", "-l", lang, "--psm", psm],
+            [tesseract_command, temp_path, "stdout", "-l", lang, "--psm", psm, "tsv"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -133,8 +163,13 @@ def _recognize_with_tesseract(image: Image.Image, tesseract_command: str) -> Ocr
         message = process.stderr.strip() or "tesseract returned a non-zero exit code"
         raise OcrError(message)
 
-    text = process.stdout.strip()
-    return OcrResult(text=text or "[NO_TEXT_DETECTED]", backend="tesseract")
+    text, confidence = _parse_tesseract_tsv(process.stdout)
+    return TesseractCandidate(text=text, confidence=confidence, variant=variant_name)
+
+
+def _score_tesseract_candidate(candidate: TesseractCandidate) -> float:
+    compact_text = "".join(candidate.text.split())
+    return candidate.confidence + min(len(compact_text), 120) * 0.08
 
 
 def _normalize_tesseract_lang(lang: str) -> str:
@@ -149,24 +184,137 @@ def _normalize_tesseract_lang(lang: str) -> str:
     return "+".join(chinese_first + rest)
 
 
-def _preprocess_for_tesseract(image: Image.Image) -> Image.Image:
-    gray = ImageOps.grayscale(image)
-    width, height = gray.size
-    scale = 2 if max(width, height) < 1800 else 1
-    if scale > 1:
-        gray = gray.resize((width * scale, height * scale), Image.Resampling.LANCZOS)
+def _tesseract_psm_values(psm: str) -> list[str]:
+    normalized = psm.strip().lower()
+    if normalized == "auto":
+        return ["6", "11"]
 
+    return [value.strip() for value in normalized.replace(",", "+").split("+") if value.strip()]
+
+
+def _preprocess_variants_for_tesseract(image: Image.Image) -> list[tuple[str, Image.Image]]:
+    mode = os.getenv("QUICKCROP_TESSERACT_PREPROCESS", "auto").strip().lower()
+    if mode not in {"auto", "color", "gray", "binary", "invert"}:
+        raise OcrError("QUICKCROP_TESSERACT_PREPROCESS must be auto, color, gray, binary, or invert")
+
+    if mode == "color":
+        return [("color", _upscale_for_tesseract(image.convert("RGB")))]
+    if mode == "gray":
+        return [("gray", _prepare_gray(image))]
+    if mode == "binary":
+        return [("binary", _prepare_binary(image, threshold=170))]
+    if mode == "invert":
+        return [("invert", _prepare_inverted_binary(image))]
+
+    return [
+        ("color", _upscale_for_tesseract(image.convert("RGB"))),
+        ("gray", _prepare_gray(image)),
+        ("binary170", _prepare_binary(image, threshold=170)),
+        ("binary130", _prepare_binary(image, threshold=130)),
+        ("invert", _prepare_inverted_binary(image)),
+    ]
+
+
+def _upscale_for_tesseract(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    scale = 2 if max(width, height) < 1800 else 1
+    if scale == 1:
+        return image
+
+    return image.resize((width * scale, height * scale), Image.Resampling.LANCZOS)
+
+
+def _prepare_gray(image: Image.Image) -> Image.Image:
+    gray = ImageOps.grayscale(image)
+    gray = _upscale_for_tesseract(gray)
+    gray = ImageOps.autocontrast(gray)
+    return ImageEnhance.Contrast(gray).enhance(1.35)
+
+
+def _prepare_binary(image: Image.Image, *, threshold: int) -> Image.Image:
+    gray = ImageOps.grayscale(image)
+    gray = _upscale_for_tesseract(gray)
     gray = ImageOps.autocontrast(gray)
     gray = ImageEnhance.Contrast(gray).enhance(1.6)
-    return gray.point(lambda pixel: 255 if pixel > 170 else 0, mode="1")
+    return gray.point(lambda pixel: 255 if pixel > threshold else 0, mode="1")
 
 
-def _maybe_save_debug_image(image: Image.Image) -> None:
+def _prepare_inverted_binary(image: Image.Image) -> Image.Image:
+    gray = ImageOps.invert(ImageOps.grayscale(image))
+    gray = _upscale_for_tesseract(gray)
+    gray = ImageOps.autocontrast(gray)
+    gray = ImageEnhance.Contrast(gray).enhance(1.6)
+    return gray.point(lambda pixel: 255 if pixel > 150 else 0, mode="1")
+
+
+def _maybe_save_debug_image(image: Image.Image, variant_name: str) -> None:
     debug_path = os.getenv("QUICKCROP_DEBUG_IMAGE")
     if not debug_path:
         return
 
-    image.save(debug_path, "PNG")
+    root, ext = os.path.splitext(debug_path)
+    if not ext:
+        ext = ".png"
+    image.save(f"{root}-{variant_name}{ext}", "PNG")
+
+
+def _parse_tesseract_tsv(tsv: str) -> tuple[str, float]:
+    lines: dict[tuple[int, int, int], list[str]] = {}
+    confidences: list[float] = []
+
+    for row in tsv.splitlines()[1:]:
+        columns = row.split("\t")
+        if len(columns) < 12:
+            continue
+
+        try:
+            level = int(columns[0])
+            block_num = int(columns[2])
+            par_num = int(columns[3])
+            line_num = int(columns[4])
+            confidence = float(columns[10])
+        except ValueError:
+            continue
+
+        text = columns[11].strip()
+        if level != 5 or not text:
+            continue
+
+        lines.setdefault((block_num, par_num, line_num), []).append(text)
+        if confidence >= 0:
+            confidences.append(confidence)
+
+    text_lines = [_join_tokens(tokens) for _, tokens in sorted(lines.items())]
+    text = "\n".join(line for line in text_lines if line.strip())
+    confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return text, confidence
+
+
+def _join_tokens(tokens: list[str]) -> str:
+    if not tokens:
+        return ""
+
+    output = tokens[0]
+    for token in tokens[1:]:
+        previous = output[-1] if output else ""
+        current = token[0]
+        if _is_cjk(previous) or _is_cjk(current):
+            output += token
+        else:
+            output += f" {token}"
+    return output
+
+
+def _is_cjk(char: str) -> bool:
+    if not char:
+        return False
+
+    code = ord(char)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+    )
 
 
 def _recognize_with_openai(image: Image.Image) -> OcrResult:

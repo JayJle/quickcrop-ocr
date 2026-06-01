@@ -67,7 +67,7 @@ From PowerShell:
 cd path\to\QuickCrop-OCR
 $env:QUICKCROP_OCR_MODE = "fast"
 $env:QUICKCROP_TESSERACT_LANG = "chi_sim+eng"
-$env:QUICKCROP_TESSERACT_PSM = "6"
+$env:QUICKCROP_TESSERACT_PSM = "auto"
 python -m quickcrop_ocr
 ```
 
@@ -77,7 +77,7 @@ From cmd.exe:
 cd path\to\QuickCrop-OCR
 set QUICKCROP_OCR_MODE=fast
 set QUICKCROP_TESSERACT_LANG=chi_sim+eng
-set QUICKCROP_TESSERACT_PSM=6
+set QUICKCROP_TESSERACT_PSM=auto
 python -m quickcrop_ocr
 ```
 
@@ -139,14 +139,29 @@ set QUICKCROP_TESSERACT_LANG=chi_sim+eng
 Page segmentation mode:
 
 ```cmd
-set QUICKCROP_TESSERACT_PSM=6
+set QUICKCROP_TESSERACT_PSM=auto
 ```
 
 Useful values:
 
+- `auto`: tries `6` and `11`, then picks the strongest result
 - `6`: one block of text
 - `7`: one single text line
 - `11`: sparse text
+
+Preprocessing mode:
+
+```cmd
+set QUICKCROP_TESSERACT_PREPROCESS=auto
+```
+
+Useful values:
+
+- `auto`: tries color, gray, binary, and inverted variants
+- `color`: better for colored text or decorated backgrounds
+- `gray`: useful for low-contrast screenshots
+- `binary`: best for clean black text on a light background
+- `invert`: useful for white text on a dark background
 
 ## Troubleshooting
 
@@ -164,10 +179,19 @@ set QUICKCROP_DEBUG_IMAGE=%TEMP%\quickcrop-debug.png
 python -m quickcrop_ocr
 ```
 
-After a capture, open:
+After a capture, open files like:
 
 ```text
-%TEMP%\quickcrop-debug.png
+%TEMP%\quickcrop-debug-color-psm6.png
+%TEMP%\quickcrop-debug-gray-psm11.png
+```
+
+For decorative backgrounds, gradients, shadows, stylized Chinese fonts, or screenshots with text over images, local Tesseract may still misread similar Chinese characters. Use OpenAI mode for higher accuracy:
+
+```cmd
+set QUICKCROP_OCR_MODE=accurate
+set OPENAI_API_KEY=sk-...
+python -m quickcrop_ocr
 ```
 
 If `tesseract` is not on `PATH`, either install it to the default location or set:
