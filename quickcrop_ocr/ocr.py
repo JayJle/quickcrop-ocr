@@ -4,6 +4,8 @@ import base64
 import io
 import json
 import os
+import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -88,16 +90,7 @@ def _recognize_with_gemini(image: Image.Image) -> OcrResult:
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
-        raise OcrError(f"HTTP {exc.code}: {_compact_error(error_body)}") from exc
-    except urllib.error.URLError as exc:
-        raise OcrError(str(exc.reason)) from exc
-    except TimeoutError as exc:
-        raise OcrError("timed out") from exc
+    body = _post_with_retries(request)
 
     try:
         parsed = json.loads(body)
@@ -109,6 +102,42 @@ def _recognize_with_gemini(image: Image.Image) -> OcrResult:
         return OcrResult(text="[NO_TEXT_DETECTED]", backend="gemini")
 
     return OcrResult(text=_format_ocr_text(text), backend=f"gemini:{model}")
+
+
+def _post_with_retries(request: urllib.request.Request) -> str:
+    attempts = int(os.getenv("QUICKCROP_GEMINI_RETRIES", "3"))
+    last_error: OcrError | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise OcrError(f"HTTP {exc.code}: {_compact_error(error_body)}") from exc
+        except urllib.error.URLError as exc:
+            last_error = OcrError(_network_error_message(exc.reason))
+        except TimeoutError as exc:
+            last_error = OcrError("timed out")
+        except ssl.SSLError as exc:
+            last_error = OcrError(_network_error_message(exc))
+
+        if attempt < attempts:
+            time.sleep(0.4 * attempt)
+
+    raise last_error or OcrError("network request failed")
+
+
+def _network_error_message(error: object) -> str:
+    message = str(error)
+    if "UNEXPECTED_EOF_WHILE_READING" in message:
+        return (
+            "Gemini network/TLS connection closed early. "
+            "This is usually caused by network instability, VPN/proxy/firewall TLS inspection, "
+            "or a reset connection. Try again, disable VPN/proxy, or use another network."
+        )
+
+    return message
 
 
 def _format_ocr_text(text: str) -> str:
