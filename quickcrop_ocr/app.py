@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from PIL import Image
 
+from .config import RuntimeConfig, prompt_runtime_config
 from .hotkey import Hotkey, HotkeyRegistrationError
 from .ocr import NoOcrBackendError, OcrError, OcrResult, recognize_text
 from .overlay import SelectionOverlay
@@ -26,13 +27,14 @@ def enable_dpi_awareness() -> None:
 
 @dataclass(frozen=True)
 class AppConfig:
+    runtime: RuntimeConfig
     hotkey_label: str = "Ctrl+Shift+X"
 
 
 class QuickCropApp:
-    def __init__(self, config: AppConfig | None = None) -> None:
+    def __init__(self, config: AppConfig) -> None:
         enable_dpi_awareness()
-        self.config = config or AppConfig()
+        self.config = config
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title("QuickCrop OCR")
@@ -98,7 +100,7 @@ class QuickCropApp:
 
     def _recognize_and_copy(self, image: Image.Image) -> None:
         try:
-            result = recognize_text(image)
+            result = recognize_text(image, self.config.runtime)
         except NoOcrBackendError as exc:
             message = str(exc)
             print(message)
@@ -182,7 +184,8 @@ class Toast:
 
 
 def main() -> int:
-    app = QuickCropApp()
+    runtime_config = prompt_runtime_config()
+    app = QuickCropApp(AppConfig(runtime=runtime_config))
 
     def handle_sigint(_signum: int, _frame: object) -> None:
         app.stop()

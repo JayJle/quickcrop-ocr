@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import io
 import json
-import os
 import ssl
 import time
 import urllib.error
@@ -12,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from PIL import Image
+
+from .config import RuntimeConfig
 
 
 OCR_PROMPT = """You are an OCR transcription engine.
@@ -32,6 +33,12 @@ Rules:
 Return only the transcribed text."""
 
 
+QWEN_ENDPOINTS = {
+    "beijing": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+    "international": "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+}
+
+
 @dataclass(frozen=True)
 class OcrResult:
     text: str
@@ -46,16 +53,20 @@ class NoOcrBackendError(OcrError):
     pass
 
 
-def recognize_text(image: Image.Image) -> OcrResult:
-    if not os.getenv("GEMINI_API_KEY"):
-        raise NoOcrBackendError("GEMINI_API_KEY is not set")
+def recognize_text(image: Image.Image, config: RuntimeConfig) -> OcrResult:
+    if not config.api_key:
+        raise NoOcrBackendError("API key is not set")
 
-    return _recognize_with_gemini(image)
+    if config.provider == "gemini":
+        return _recognize_with_gemini(image, config)
+    if config.provider == "qwen":
+        return _recognize_with_qwen(image, config)
+
+    raise OcrError(f"unsupported OCR provider: {config.provider}")
 
 
-def _recognize_with_gemini(image: Image.Image) -> OcrResult:
-    api_key = os.environ["GEMINI_API_KEY"]
-    model = os.getenv("QUICKCROP_GEMINI_MODEL", "gemini-2.5-flash")
+def _recognize_with_gemini(image: Image.Image, config: RuntimeConfig) -> OcrResult:
+    model = config.model
     image_data = _image_to_base64(image)
     payload = {
         "contents": [
@@ -84,7 +95,7 @@ def _recognize_with_gemini(image: Image.Image) -> OcrResult:
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         data=json.dumps(payload).encode("utf-8"),
         headers={
-            "x-goog-api-key": api_key,
+            "x-goog-api-key": config.api_key,
             "Content-Type": "application/json",
         },
         method="POST",
@@ -101,11 +112,65 @@ def _recognize_with_gemini(image: Image.Image) -> OcrResult:
     if not text:
         return OcrResult(text="[NO_TEXT_DETECTED]", backend="gemini")
 
-    return OcrResult(text=_format_ocr_text(text), backend=f"gemini:{model}")
+    return OcrResult(text=_format_ocr_text(text, config), backend=f"gemini:{model}")
 
 
-def _post_with_retries(request: urllib.request.Request) -> str:
-    attempts = int(os.getenv("QUICKCROP_GEMINI_RETRIES", "3"))
+def _recognize_with_qwen(image: Image.Image, config: RuntimeConfig) -> OcrResult:
+    model = config.model
+    endpoint = _qwen_endpoint(config)
+    data_url = f"data:image/jpeg;base64,{_image_to_base64(image)}"
+    payload = {
+        "model": model,
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"image": data_url},
+                        {"text": OCR_PROMPT},
+                    ],
+                }
+            ]
+        },
+        "parameters": {
+            "temperature": 0,
+        },
+    }
+
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    body = _post_with_retries(request, provider="Qwen")
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise OcrError("received invalid JSON from Qwen") from exc
+
+    text = _extract_response_text(parsed).strip()
+    if not text:
+        return OcrResult(text="[NO_TEXT_DETECTED]", backend="qwen")
+
+    return OcrResult(text=_format_ocr_text(text, config), backend=f"qwen:{model}")
+
+
+def _qwen_endpoint(config: RuntimeConfig) -> str:
+    region = config.qwen_region or "beijing"
+    try:
+        return QWEN_ENDPOINTS[region]
+    except KeyError as exc:
+        raise OcrError("Qwen region must be beijing or international") from exc
+
+
+def _post_with_retries(request: urllib.request.Request, *, provider: str = "Gemini") -> str:
+    attempts = 3
     last_error: OcrError | None = None
 
     for attempt in range(1, attempts + 1):
@@ -116,11 +181,13 @@ def _post_with_retries(request: urllib.request.Request) -> str:
             error_body = exc.read().decode("utf-8", errors="replace")
             raise OcrError(f"HTTP {exc.code}: {_compact_error(error_body)}") from exc
         except urllib.error.URLError as exc:
-            last_error = OcrError(_network_error_message(exc.reason))
+            last_error = OcrError(_network_error_message(exc.reason, provider=provider))
         except TimeoutError as exc:
             last_error = OcrError("timed out")
         except ssl.SSLError as exc:
-            last_error = OcrError(_network_error_message(exc))
+            last_error = OcrError(_network_error_message(exc, provider=provider))
+        except (ConnectionResetError, OSError) as exc:
+            last_error = OcrError(_network_error_message(exc, provider=provider))
 
         if attempt < attempts:
             time.sleep(0.4 * attempt)
@@ -128,24 +195,30 @@ def _post_with_retries(request: urllib.request.Request) -> str:
     raise last_error or OcrError("network request failed")
 
 
-def _network_error_message(error: object) -> str:
+def _network_error_message(error: object, *, provider: str) -> str:
     message = str(error)
     if "UNEXPECTED_EOF_WHILE_READING" in message:
         return (
-            "Gemini network/TLS connection closed early. "
+            f"{provider} network/TLS connection closed early. "
             "This is usually caused by network instability, VPN/proxy/firewall TLS inspection, "
             "or a reset connection. Try again, disable VPN/proxy, or use another network."
+        )
+    if "10054" in message or "forcibly closed" in message or "\u5f3a\u8feb\u5173\u95ed" in message:
+        return (
+            f"{provider} connection was reset by the remote host. "
+            "This is usually caused by network instability, VPN/proxy/firewall behavior, "
+            "or a provider endpoint rejecting/closing the connection. Try again or switch networks."
         )
 
     return message
 
 
-def _format_ocr_text(text: str) -> str:
+def _format_ocr_text(text: str, config: RuntimeConfig) -> str:
     if text == "[NO_TEXT_DETECTED]":
         return text
 
-    text = _apply_output_format(text)
-    if not _space_after_punctuation_enabled():
+    text = _apply_output_format(text, config)
+    if not config.space_after_punctuation:
         return text
 
     result: list[str] = []
@@ -168,19 +241,13 @@ def _format_ocr_text(text: str) -> str:
     return "".join(result)
 
 
-def _apply_output_format(text: str) -> str:
-    output_format = os.getenv("QUICKCROP_OUTPUT_FORMAT", "preserve").strip().lower()
-    if output_format == "preserve":
+def _apply_output_format(text: str, config: RuntimeConfig) -> str:
+    if config.output_format == "preserve":
         return text
-    if output_format == "single_line":
+    if config.output_format == "single_line":
         return " ".join(text.split())
 
-    raise OcrError("QUICKCROP_OUTPUT_FORMAT must be preserve or single_line")
-
-
-def _space_after_punctuation_enabled() -> bool:
-    value = os.getenv("QUICKCROP_SPACE_AFTER_PUNCTUATION", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
+    raise OcrError("output format must be preserve or single_line")
 
 
 def _image_to_base64(image: Image.Image) -> str:
@@ -212,7 +279,7 @@ def _extract_response_text(payload: dict[str, Any]) -> str:
 
 def _walk_response(value: Any, chunks: list[str]) -> None:
     if isinstance(value, dict):
-        if value.get("type") in {"output_text", "text"} and isinstance(value.get("text"), str):
+        if isinstance(value.get("text"), str):
             chunks.append(value["text"])
         for child in value.values():
             _walk_response(child, chunks)
