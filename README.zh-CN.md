@@ -39,7 +39,15 @@ Qwen 的[视觉理解文档](https://www.alibabacloud.com/help/en/model-studio/v
 
 ## 安装
 
-克隆 [JayJle/quickcrop-ocr](https://github.com/JayJle/quickcrop-ocr)，然后安装 Python 依赖：
+克隆 [JayJle/quickcrop-ocr](https://github.com/JayJle/quickcrop-ocr)，然后安装 Python 依赖。**请根据你使用的终端选择命令，不要混用路径写法。**
+
+- **PowerShell**：提示符通常以 `PS` 开头，例如 `PS C:\quickcrop-ocr>`。
+- **命令提示符（CMD）**：提示符通常类似 `C:\quickcrop-ocr>`。
+- **Git Bash**：提示符中通常有 `MINGW64` 或 `MINGW32`，输入命令前显示 `$`。请使用正斜杠 `/`，不要照抄 PowerShell/CMD 示例中未加引号的反斜杠 `\`。
+
+只复制命令本身，不要复制提示符中的 `$`、`>` 或 `(base)`。以下示例使用的是 Windows Python，不是 WSL/Linux Python。
+
+### PowerShell / 命令提示符（CMD）
 
 ```powershell
 git clone https://github.com/JayJle/quickcrop-ocr.git
@@ -48,14 +56,31 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-以上命令直接使用虚拟环境中的 Python，无需运行 PowerShell 激活脚本。
+### Git Bash
+
+```bash
+git clone https://github.com/JayJle/quickcrop-ocr.git
+cd quickcrop-ocr
+python -m venv .venv
+./.venv/Scripts/python.exe -m pip install -r requirements.txt
+```
+
+如果已经克隆了仓库，请进入项目目录，跳过 `git clone` 和 `cd quickcrop-ocr`。如果此前已经成功创建 `.venv`，也可以跳过 `python -m venv .venv`。两套命令都直接使用虚拟环境中的 Python，无需激活环境；即使提示符中显示 `(base)`，也可以直接运行。
 
 ## 启动
 
-在克隆得到的项目目录中运行：
+在克隆得到的项目目录中，根据终端选择对应命令。
+
+**PowerShell / 命令提示符（CMD）：**
 
 ```powershell
 .\.venv\Scripts\python.exe -m quickcrop_ocr
+```
+
+**Git Bash：**
+
+```bash
+./.venv/Scripts/python.exe -m quickcrop_ocr
 ```
 
 如果已在当前 Python 或 Conda 环境中安装依赖，也可以运行 `python -m quickcrop_ocr`。
@@ -184,6 +209,15 @@ Qwen 地域：
 
 ## 常见问题
 
+如果 Git Bash 提示 `bash: ..venvScriptspython.exe: command not found`，说明使用了 PowerShell/CMD 的路径写法。Bash 把未加引号的反斜杠当成了转义符。请在项目目录中改用下面的命令：
+
+```bash
+./.venv/Scripts/python.exe -m pip install -r requirements.txt
+./.venv/Scripts/python.exe -m quickcrop_ocr
+```
+
+这个错误本身不代表虚拟环境创建失败。已有的 `.venv` 不需要重新创建，也不需要激活。
+
 如果提示 API key 无效，请先检查所选地域是否与创建密钥的地域一致，再检查是否复制错误，或密钥是否已被撤销。
 
 如果识别很慢：
@@ -218,10 +252,18 @@ Qwen 地域：
 
 ## 测试
 
-运行离线回归测试：
+在项目目录中运行离线回归测试。
+
+**PowerShell / 命令提示符（CMD）：**
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -v
+```
+
+**Git Bash：**
+
+```bash
+./.venv/Scripts/python.exe -m unittest discover -v
 ```
 
 如果当前 Python 环境已配置好，也可以运行 `python -m unittest discover -v`。测试不需要真实 API key，不会发起收费 OCR 请求。

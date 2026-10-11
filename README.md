@@ -43,7 +43,15 @@ Tesseract, OpenAI, and Gemini are not used or required. The terminal menus and p
 
 ## Installation
 
-Clone [JayJle/quickcrop-ocr](https://github.com/JayJle/quickcrop-ocr), then install Python dependencies:
+Clone [JayJle/quickcrop-ocr](https://github.com/JayJle/quickcrop-ocr), then install Python dependencies. **Choose the commands for your terminal; do not mix the path styles.**
+
+- **PowerShell**: the prompt usually starts with `PS`, for example `PS C:\quickcrop-ocr>`.
+- **Command Prompt (CMD)**: the prompt usually looks like `C:\quickcrop-ocr>`.
+- **Git Bash**: the prompt often contains `MINGW64` or `MINGW32`, with a `$` before commands. Use forward slashes `/`, not the unquoted backslashes `\` in the PowerShell/CMD examples.
+
+Copy only the commands, not the prompt symbols (`$`, `>`, or `(base)`). All examples below use Windows Python, not WSL/Linux Python.
+
+### PowerShell / Command Prompt (CMD)
 
 ```powershell
 git clone https://github.com/JayJle/quickcrop-ocr.git
@@ -52,14 +60,31 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-These commands use the virtual environment directly, so PowerShell script activation is not needed.
+### Git Bash
+
+```bash
+git clone https://github.com/JayJle/quickcrop-ocr.git
+cd quickcrop-ocr
+python -m venv .venv
+./.venv/Scripts/python.exe -m pip install -r requirements.txt
+```
+
+If you already cloned the repo, open its folder and skip `git clone` and `cd quickcrop-ocr`. If `.venv` was already created successfully, skip `python -m venv .venv` too. Both sets of commands use the virtual environment directly; activation is not needed, even if your prompt shows `(base)`.
 
 ## Run
 
-From the cloned project folder, run:
+From the cloned project folder, use the command for your terminal.
+
+**PowerShell / Command Prompt (CMD):**
 
 ```powershell
 .\.venv\Scripts\python.exe -m quickcrop_ocr
+```
+
+**Git Bash:**
+
+```bash
+./.venv/Scripts/python.exe -m quickcrop_ocr
 ```
 
 If you already installed the dependencies in your active Python or Conda environment, `python -m quickcrop_ocr` works as well.
@@ -186,6 +211,15 @@ This sentence wraps because the column is narrow.
 
 ## Troubleshooting
 
+If Git Bash reports `bash: ..venvScriptspython.exe: command not found`, a PowerShell/CMD path was pasted into Bash. Bash treated the unquoted backslashes as escape characters. From the project folder, use these commands instead:
+
+```bash
+./.venv/Scripts/python.exe -m pip install -r requirements.txt
+./.venv/Scripts/python.exe -m quickcrop_ocr
+```
+
+This error alone does not mean virtual-environment creation failed. You do not need to recreate an existing `.venv` or activate it.
+
 If the app says the API key is invalid, first check that the selected region matches the region where you created the key, then check for copy/paste errors or a revoked key.
 
 If OCR is slow:
@@ -220,10 +254,18 @@ This is a personal-use MVP optimized for quick hosted vision OCR on Windows.
 
 ## Tests
 
-Run the offline regression tests with:
+Run the offline regression tests from the project folder.
+
+**PowerShell / Command Prompt (CMD):**
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -v
+```
+
+**Git Bash:**
+
+```bash
+./.venv/Scripts/python.exe -m unittest discover -v
 ```
 
 With an already configured active Python environment, use `python -m unittest discover -v` instead. The tests do not need a real API key or make paid OCR requests.
