@@ -1,5 +1,7 @@
 # QuickCrop OCR
 
+**English** | [简体中文](README.zh-CN.md)
+
 QuickCrop OCR is a lightweight Windows desktop utility for copying text from a captured screen region.
 
 Press a global shortcut, drag over text, and the recognized text is copied to the clipboard for immediate pasting.
