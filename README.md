@@ -166,9 +166,9 @@ Completion checks follow the [DashScope response format](https://help.aliyun.com
 
 ## Clipboard Safety
 
-Before replacing clipboard contents, the app allocates the new text, locks the clipboard, and backs up its available formats. It does not clear the clipboard when the lock or backup fails. After a failed write, it attempts to restore the backup while still holding the lock.
+Before replacing clipboard contents, the app allocates the new text, locks the clipboard, and attempts to back up readable formats. Allocation or lock failures leave the clipboard unchanged. Unreadable, unsupported, or nonduplicable formats are skipped during backup, so they do not block normal copying. A successful copy replaces the old clipboard contents with the OCR text.
 
-Temporary copy failures are retried up to three times. If copying still fails, the OCR result is retained for **Copy again**. Unsupported private clipboard formats are left untouched. Windows-level restoration failures are reported explicitly; restoration cannot be guaranteed if Windows also rejects the recovery writes.
+If writing fails, the app attempts to restore the available backup while still holding the lock. Recovery is **best-effort**: skipped formats cannot be restored, and Windows may also reject recovery writes. Partial recovery is reported explicitly, never described as a full restoration. Transient copy failures are retried up to three times, but incomplete recovery is not automatically retried. The OCR result remains in memory for **Copy again** if copying fails.
 
 ## Prompted Settings
 

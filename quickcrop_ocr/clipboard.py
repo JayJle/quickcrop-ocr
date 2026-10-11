@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass, field
 
 
 CF_UNICODETEXT = 13
@@ -14,6 +15,12 @@ class ClipboardError(RuntimeError):
         self.retryable = retryable
 
 
+@dataclass
+class ClipboardBackup:
+    handles: list[tuple[int, int]] = field(default_factory=list)
+    complete: bool = True
+
+
 class ClipboardWriter:
     def __init__(self, api: WindowsClipboardApi | None = None) -> None:
         self.api = api or WindowsClipboardApi()
@@ -21,14 +28,14 @@ class ClipboardWriter:
     def copy(self, text: str, hwnd: int) -> None:
         api = self.api
         new_handle = api.allocate_text(text)
-        backup: list[tuple[int, int]] = []
+        backup = ClipboardBackup()
         opened = False
         try:
             if not api.open(hwnd):
                 raise ClipboardError("Clipboard is busy", retryable=True)
             opened = True
-            # Prepare *all* data before EmptyClipboard, while holding its lock.
-            # Unsupported/delayed formats that cannot be backed up fail closed.
+            # Backup is best-effort: unreadable formats must not block copying.
+            # Allocate the new text first and keep the lock through recovery.
             backup = api.snapshot()
             if not api.clear():
                 raise ClipboardError("Could not open clipboard for replacement", retryable=True)
@@ -37,15 +44,15 @@ class ClipboardWriter:
                 return
 
             failed: list[tuple[int, int]] = []
-            for format_id, handle in backup:
+            for format_id, handle in backup.handles:
                 if not api.set_data(format_id, handle):
                     failed.append((format_id, handle))
-            backup = failed
+            backup.handles = failed
             if failed:
                 # Retry restoration before releasing the lock, never later when
                 # another application may have put new data on the clipboard.
-                backup = [(fmt, handle) for fmt, handle in failed if not api.set_data(fmt, handle)]
-            if backup:
+                backup.handles = [(fmt, handle) for fmt, handle in failed if not api.set_data(fmt, handle)]
+            if backup.handles or not backup.complete:
                 raise ClipboardError("Copy failed; some previous clipboard formats could not be restored")
             raise ClipboardError("Copy failed; previous clipboard restored", retryable=True)
         finally:
@@ -53,7 +60,7 @@ class ClipboardWriter:
                 api.close()
             if new_handle:
                 api.free(CF_UNICODETEXT, new_handle)
-            for format_id, handle in backup:
+            for format_id, handle in backup.handles:
                 api.free(format_id, handle)
 
 
@@ -113,8 +120,8 @@ class WindowsClipboardApi:
     def set_data(self, format_id: int, handle: int) -> bool:
         return bool(self.user32.SetClipboardData(format_id, handle))
 
-    def snapshot(self) -> list[tuple[int, int]]:
-        backup: list[tuple[int, int]] = []
+    def snapshot(self) -> ClipboardBackup:
+        backup = ClipboardBackup()
         format_id = 0
         try:
             while True:
@@ -122,23 +129,26 @@ class WindowsClipboardApi:
                 format_id = self.user32.EnumClipboardFormats(format_id)
                 if not format_id:
                     if ctypes.get_last_error():
-                        raise ClipboardError("Could not back up clipboard; nothing changed")
+                        backup.complete = False
                     return backup
                 if format_id == 0x80 or 0x200 <= format_id <= 0x2FF:
-                    raise ClipboardError("Clipboard contains an unsupported private format; nothing changed")
+                    backup.complete = False
+                    continue
                 source = self.user32.GetClipboardData(format_id)
                 if not source:
-                    raise ClipboardError("Could not read previous clipboard data; nothing changed", retryable=True)
+                    backup.complete = False
+                    continue
                 base_format = {0x82: 2, 0x83: 3, 0x8E: 14}.get(format_id, format_id)
                 if base_format == 14:
                     handle = self.gdi32.CopyEnhMetaFileW(source, None)
                 else:
                     handle = self.ole32.OleDuplicateData(source, base_format, GMEM_MOVEABLE)
                 if not handle:
-                    raise ClipboardError("Could not back up previous clipboard data; nothing changed")
-                backup.append((format_id, handle))
+                    backup.complete = False
+                    continue
+                backup.handles.append((format_id, handle))
         except Exception:
-            for fmt, handle in backup:
+            for fmt, handle in backup.handles:
                 self.free(fmt, handle)
             raise
 
