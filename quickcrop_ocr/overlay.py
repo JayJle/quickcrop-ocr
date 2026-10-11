@@ -4,7 +4,7 @@ import ctypes
 import tkinter as tk
 from collections.abc import Callable
 
-from PIL import Image, ImageGrab
+from PIL import Image, ImageGrab, ImageTk
 
 
 SM_XVIRTUALSCREEN = 76
@@ -14,9 +14,13 @@ SM_CYVIRTUALSCREEN = 79
 
 
 class SelectionOverlay:
-    def __init__(self, root: tk.Tk, on_capture: Callable[[Image.Image | None], None]) -> None:
+    def __init__(
+        self, root: tk.Tk, on_capture: Callable[[Image.Image | None], None],
+        *, on_error: Callable[[str], None] | None = None,
+    ) -> None:
         self.root = root
         self.on_capture = on_capture
+        self.on_error = on_error
         self.window: tk.Toplevel | None = None
         self.canvas: tk.Canvas | None = None
         self.start_x = 0
@@ -27,13 +31,19 @@ class SelectionOverlay:
         self.virtual_top = 0
         self.virtual_width = 0
         self.virtual_height = 0
+        self.snapshot: Image.Image | None = None
+        self.preview: ImageTk.PhotoImage | None = None
 
     def show(self) -> None:
         self._set_virtual_screen()
+        # Freeze before creating the overlay. Only the selected crop leaves here.
+        self.snapshot = ImageGrab.grab(all_screens=True)
+        if self.snapshot.size != (self.virtual_width, self.virtual_height):
+            self.close()
+            raise OSError("Display size changed during capture. Please try again.")
         self.window = tk.Toplevel(self.root)
         self.window.overrideredirect(True)
         self.window.attributes("-topmost", True)
-        self.window.attributes("-alpha", 0.35)
         self.window.configure(bg="black", cursor="crosshair")
         self.window.geometry(
             f"{self.virtual_width}x{self.virtual_height}+{self.virtual_left}+{self.virtual_top}"
@@ -48,13 +58,8 @@ class SelectionOverlay:
             cursor="crosshair",
         )
         self.canvas.pack(fill="both", expand=True)
-        self.canvas.create_text(
-            self.virtual_width // 2,
-            48,
-            text="Drag to select text region   |   Esc to cancel",
-            fill="white",
-            font=("Segoe UI", 14),
-        )
+        self.preview = ImageTk.PhotoImage(self.snapshot, master=self.window)
+        self.canvas.create_image(0, 0, image=self.preview, anchor="nw")
 
         self.window.bind("<ButtonPress-1>", self._on_press)
         self.window.bind("<B1-Motion>", self._on_drag)
@@ -82,16 +87,31 @@ class SelectionOverlay:
         end_y = int(event.y_root)
         left, top, right, bottom = _normalize_rect(self.start_x, self.start_y, end_x, end_y)
 
-        if right - left < 4 or bottom - top < 4:
-            self._close()
-            self.on_capture(None)
-            return
-
-        self._close()
-        self.root.after(120, lambda: self._capture((left, top, right, bottom)))
+        image = None
+        error: Exception | None = None
+        try:
+            if self.snapshot is not None:
+                bbox = (
+                    max(0, left - self.virtual_left),
+                    max(0, top - self.virtual_top),
+                    min(self.virtual_width, right - self.virtual_left),
+                    min(self.virtual_height, bottom - self.virtual_top),
+                )
+                if bbox[2] - bbox[0] >= 4 and bbox[3] - bbox[1] >= 4:
+                    image = self.snapshot.crop(bbox)
+        except (OSError, ValueError, MemoryError) as exc:
+            error = exc
+        finally:
+            self.close()
+        if error is not None:
+            if self.on_error is None:
+                raise error
+            self.on_error(str(error))
+        else:
+            self.on_capture(image)
 
     def _cancel(self, _event: tk.Event | None = None) -> None:
-        self._close()
+        self.close()
         self.on_capture(None)
 
     def _draw_selection(self, start_x: int, start_y: int, end_x: int, end_y: int) -> None:
@@ -130,24 +150,17 @@ class SelectionOverlay:
             font=("Segoe UI", 10),
         )
 
-    def _capture(self, bbox: tuple[int, int, int, int]) -> None:
-        try:
-            image = ImageGrab.grab(bbox=bbox, all_screens=True)
-        except TypeError:
-            image = ImageGrab.grab(bbox=bbox)
-        except OSError:
-            self.on_capture(None)
-            return
-
-        self.on_capture(image)
-
-    def _close(self) -> None:
+    def close(self) -> None:
         if self.window is not None and self.window.winfo_exists():
             self.window.destroy()
         self.window = None
         self.canvas = None
         self.current_rect = None
         self.dim_label = None
+        self.preview = None
+        if self.snapshot is not None:
+            self.snapshot.close()
+            self.snapshot = None
 
 
 def _normalize_rect(x1: int, y1: int, x2: int, y2: int) -> tuple[int, int, int, int]:

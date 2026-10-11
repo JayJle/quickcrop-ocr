@@ -3,19 +3,26 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
+import queue
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from PIL import Image
 
 from .config import RuntimeConfig
+from .layout import NO_TEXT_MARKER, format_text, get_layout
 
 
-OCR_PROMPT = """You are an OCR transcription engine.
+OCR_PROMPT = f"""You are an OCR transcription engine.
 
 Transcribe only the text visible in the provided cropped image.
 
@@ -25,10 +32,9 @@ Rules:
 3. Do not explain.
 4. Do not add text that is not visible.
 5. Preserve the natural reading order.
-6. Preserve line breaks and paragraph breaks.
-7. If the image contains code, preserve indentation as much as possible.
-8. If the image contains a table, preserve rows using tabs or spaces.
-9. If no readable text exists, return: [NO_TEXT_DETECTED]
+6. Keep all original punctuation and symbols exactly; do not remove, normalize, or add punctuation.
+7. Do not insert extra spaces after punctuation.
+8. If no readable text exists, return: {NO_TEXT_MARKER}
 
 Return only the transcribed text."""
 
@@ -37,6 +43,13 @@ QWEN_ENDPOINTS = {
     "beijing": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
     "international": "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
 }
+
+TOTAL_TIMEOUT_SECONDS = 30.0
+REQUEST_TIMEOUT_SECONDS = 20.0
+MAX_ATTEMPTS = 3
+RETRYABLE_HTTP_CODES = {408, 429, 500, 502, 503, 504}
+# Bound abandoned socket calls too: cancelling must not create unbounded workers.
+_REQUEST_SLOT = threading.BoundedSemaphore(1)
 
 
 @dataclass(frozen=True)
@@ -53,71 +66,63 @@ class NoOcrBackendError(OcrError):
     pass
 
 
-def recognize_text(image: Image.Image, config: RuntimeConfig) -> OcrResult:
+class OcrCancelled(OcrError):
+    pass
+
+
+class OcrTimeout(OcrError):
+    pass
+
+
+@dataclass
+class RequestControl:
+    timeout: float = TOTAL_TIMEOUT_SECONDS
+    on_progress: Callable[[str], None] = lambda _message: None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    started: float = field(default_factory=time.monotonic)
+
+    def remaining(self) -> float:
+        if self.cancel_event.is_set():
+            raise OcrCancelled("OCR canceled")
+        remaining = self.timeout - (time.monotonic() - self.started)
+        if remaining <= 0:
+            raise OcrTimeout(f"OCR exceeded the {self.timeout:g}s time budget. Try a smaller crop.")
+        return remaining
+
+    def wait(self, seconds: float) -> None:
+        wake_at = time.monotonic() + seconds
+        while True:
+            remaining = self.remaining()
+            delay = wake_at - time.monotonic()
+            if delay <= 0:
+                return
+            # Timed waits can wake early. Recheck both clocks before retrying.
+            self.cancel_event.wait(min(delay, remaining))
+
+
+def recognize_text(
+    image: Image.Image, config: RuntimeConfig, *, control: RequestControl | None = None
+) -> OcrResult:
     if not config.api_key:
         raise NoOcrBackendError("API key is not set")
 
-    if config.provider == "gemini":
-        return _recognize_with_gemini(image, config)
-    if config.provider == "qwen":
-        return _recognize_with_qwen(image, config)
-
-    raise OcrError(f"unsupported OCR provider: {config.provider}")
-
-
-def _recognize_with_gemini(image: Image.Image, config: RuntimeConfig) -> OcrResult:
-    model = config.model
-    image_data = _image_to_base64(image)
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {"text": OCR_PROMPT},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": image_data,
-                        }
-                    },
-                ],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0,
-            "thinkingConfig": {
-                "thinkingBudget": 0,
-            },
-        },
-    }
-
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "x-goog-api-key": config.api_key,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
-    body = _post_with_retries(request)
-
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise OcrError("received invalid JSON from Gemini") from exc
-
-    text = _extract_response_text(parsed).strip()
-    if not text:
-        return OcrResult(text="[NO_TEXT_DETECTED]", backend="gemini")
-
-    return OcrResult(text=_format_ocr_text(text, config), backend=f"gemini:{model}")
+    control = control or RequestControl()
+    control.remaining()
+    result = _recognize_with_qwen(image, config, control)
+    control.remaining()
+    return result
 
 
-def _recognize_with_qwen(image: Image.Image, config: RuntimeConfig) -> OcrResult:
+def _recognize_with_qwen(
+    image: Image.Image, config: RuntimeConfig, control: RequestControl
+) -> OcrResult:
     model = config.model
     endpoint = _qwen_endpoint(config)
+    try:
+        layout = get_layout(config.output_format)
+    except ValueError as exc:
+        raise OcrError(str(exc)) from exc
+    prompt = f"{OCR_PROMPT}\n\nText layout:\n{layout.instruction}"
     data_url = f"data:image/jpeg;base64,{_image_to_base64(image)}"
     payload = {
         "model": model,
@@ -127,7 +132,7 @@ def _recognize_with_qwen(image: Image.Image, config: RuntimeConfig) -> OcrResult
                     "role": "user",
                     "content": [
                         {"image": data_url},
-                        {"text": OCR_PROMPT},
+                        {"text": prompt},
                     ],
                 }
             ]
@@ -147,18 +152,16 @@ def _recognize_with_qwen(image: Image.Image, config: RuntimeConfig) -> OcrResult
         method="POST",
     )
 
-    body = _post_with_retries(request, provider="Qwen")
+    body = _post_with_retries(request, control)
+    control.on_progress("Checking Qwen result")
 
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:
         raise OcrError("received invalid JSON from Qwen") from exc
 
-    text = _extract_response_text(parsed).strip()
-    if not text:
-        return OcrResult(text="[NO_TEXT_DETECTED]", backend="qwen")
-
-    return OcrResult(text=_format_ocr_text(text, config), backend=f"qwen:{model}")
+    text = _extract_response_text(parsed)
+    return OcrResult(text=format_text(text, config.output_format), backend=f"qwen:{model}")
 
 
 def _qwen_endpoint(config: RuntimeConfig) -> str:
@@ -169,85 +172,118 @@ def _qwen_endpoint(config: RuntimeConfig) -> str:
         raise OcrError("Qwen region must be beijing or international") from exc
 
 
-def _post_with_retries(request: urllib.request.Request, *, provider: str = "Gemini") -> str:
-    attempts = 3
+def _post_with_retries(request: urllib.request.Request, control: RequestControl) -> str:
     last_error: OcrError | None = None
 
-    for attempt in range(1, attempts + 1):
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        control.remaining()
+        control.on_progress(f"Reading text with Qwen (attempt {attempt}/{MAX_ATTEMPTS})")
+        delay = 0.4 * attempt
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                return response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise OcrError(f"HTTP {exc.code}: {_compact_error(error_body)}") from exc
+            status, body, retry_after = _request_with_budget(request, control)
+            if status < 400:
+                return body
+            last_error = OcrError(f"Qwen HTTP {status}: {_compact_error(body)}")
+            if status not in RETRYABLE_HTTP_CODES:
+                raise last_error
+            delay = _retry_delay(retry_after, delay)
         except urllib.error.URLError as exc:
-            last_error = OcrError(_network_error_message(exc.reason, provider=provider))
-        except TimeoutError as exc:
-            last_error = OcrError("timed out")
+            last_error = OcrError(_network_error_message(exc.reason))
+        except TimeoutError:
+            last_error = OcrError("Qwen request timed out")
         except ssl.SSLError as exc:
-            last_error = OcrError(_network_error_message(exc, provider=provider))
+            last_error = OcrError(_network_error_message(exc))
         except (ConnectionResetError, OSError) as exc:
-            last_error = OcrError(_network_error_message(exc, provider=provider))
+            last_error = OcrError(_network_error_message(exc))
 
-        if attempt < attempts:
-            time.sleep(0.4 * attempt)
+        if attempt < MAX_ATTEMPTS:
+            control.on_progress(f"{last_error}. Retrying {attempt + 1}/{MAX_ATTEMPTS} in {delay:g}s")
+            control.wait(delay)
 
     raise last_error or OcrError("network request failed")
 
 
-def _network_error_message(error: object, *, provider: str) -> str:
+def _request_with_budget(
+    request: urllib.request.Request, control: RequestControl
+) -> tuple[int, str, str | None]:
+    acquired = False
+    while not acquired:
+        acquired = _REQUEST_SLOT.acquire(timeout=min(0.05, control.remaining()))
+        if not acquired:
+            control.on_progress("Waiting for the previous Qwen connection to close")
+
+    replies: queue.Queue[tuple[tuple[int, str, str | None] | None, Exception | None]] = queue.Queue()
+
+    def send() -> None:
+        try:
+            timeout = min(REQUEST_TIMEOUT_SECONDS, control.remaining())
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    reply = (200, response.read().decode("utf-8"), None)
+            except urllib.error.HTTPError as exc:
+                with exc:
+                    reply = (
+                        exc.code, exc.read().decode("utf-8", errors="replace"),
+                        exc.headers.get("Retry-After") if exc.headers else None,
+                    )
+            replies.put((reply, None))
+        except Exception as exc:
+            replies.put((None, exc))
+        finally:
+            _REQUEST_SLOT.release()
+
+    try:
+        control.remaining()
+        threading.Thread(target=send, daemon=True, name="qwen-http").start()
+    except Exception:
+        _REQUEST_SLOT.release()
+        raise
+
+    # urllib's timeout is per socket operation, not a total deadline. Polling here
+    # also lets the caller cancel DNS/connect/read without waiting for the socket.
+    while True:
+        remaining = control.remaining()
+        try:
+            reply, error = replies.get(timeout=min(0.05, remaining))
+        except queue.Empty:
+            continue
+        control.remaining()
+        if error is not None:
+            raise error
+        assert reply is not None
+        return reply
+
+
+def _retry_delay(value: str | None, default: float) -> float:
+    if value:
+        try:
+            seconds = float(value)
+            return max(0.0, seconds) if math.isfinite(seconds) else default
+        except ValueError:
+            try:
+                date = parsedate_to_datetime(value)
+                return max(0.0, (date - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                pass
+    return default
+
+
+def _network_error_message(error: object) -> str:
     message = str(error)
     if "UNEXPECTED_EOF_WHILE_READING" in message:
         return (
-            f"{provider} network/TLS connection closed early. "
+            "Qwen network/TLS connection closed early. "
             "This is usually caused by network instability, VPN/proxy/firewall TLS inspection, "
             "or a reset connection. Try again, disable VPN/proxy, or use another network."
         )
     if "10054" in message or "forcibly closed" in message or "\u5f3a\u8feb\u5173\u95ed" in message:
         return (
-            f"{provider} connection was reset by the remote host. "
+            "Qwen connection was reset by the remote host. "
             "This is usually caused by network instability, VPN/proxy/firewall behavior, "
             "or a provider endpoint rejecting/closing the connection. Try again or switch networks."
         )
 
     return message
-
-
-def _format_ocr_text(text: str, config: RuntimeConfig) -> str:
-    if text == "[NO_TEXT_DETECTED]":
-        return text
-
-    text = _apply_output_format(text, config)
-    if not config.space_after_punctuation:
-        return text
-
-    result: list[str] = []
-    punctuation = set(",;:!?\u3001\uff0c\u3002\uff1b\uff1a\uff01\uff1f")
-
-    for index, char in enumerate(text):
-        result.append(char)
-        if char not in punctuation and char != ".":
-            continue
-
-        next_char = text[index + 1] if index + 1 < len(text) else ""
-        prev_char = text[index - 1] if index > 0 else ""
-        if not next_char or next_char.isspace():
-            continue
-        if char == "." and prev_char.isdigit() and next_char.isdigit():
-            continue
-
-        result.append(" ")
-
-    return "".join(result)
-
-
-def _apply_output_format(text: str, config: RuntimeConfig) -> str:
-    if config.output_format == "preserve":
-        return text
-    if config.output_format == "single_line":
-        return " ".join(text.split())
-
-    raise OcrError("output format must be preserve or single_line")
 
 
 def _image_to_base64(image: Image.Image) -> str:
@@ -258,34 +294,38 @@ def _image_to_base64(image: Image.Image) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def _extract_response_text(payload: dict[str, Any]) -> str:
-    chunks: list[str] = []
-    for candidate in payload.get("candidates", []):
-        if not isinstance(candidate, dict):
-            continue
-        content = candidate.get("content")
-        if not isinstance(content, dict):
-            continue
-        for part in content.get("parts", []):
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
-                chunks.append(part["text"])
-
-    if chunks:
-        return "\n".join(chunks)
-
-    _walk_response(payload, chunks)
-    return "\n".join(chunk for chunk in chunks if chunk)
-
-
-def _walk_response(value: Any, chunks: list[str]) -> None:
-    if isinstance(value, dict):
-        if isinstance(value.get("text"), str):
-            chunks.append(value["text"])
-        for child in value.values():
-            _walk_response(child, chunks)
-    elif isinstance(value, list):
-        for child in value:
-            _walk_response(child, chunks)
+def _extract_response_text(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        raise OcrError("Qwen returned an invalid response object")
+    if payload.get("code"):
+        raise OcrError(f"Qwen rejected the request: {_compact_error(json.dumps(payload))}")
+    output = payload.get("output")
+    choices = output.get("choices") if isinstance(output, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise OcrError("Qwen returned no completed answer (missing choices)")
+    choice = choices[0]
+    reason = choice.get("finish_reason")
+    if reason == "length":
+        raise OcrError("Qwen output was truncated. Nothing copied; select a smaller region.")
+    if reason != "stop":
+        raise OcrError(f"Qwen did not complete the answer ({reason or 'missing finish_reason'}). Nothing copied.")
+    message = choice.get("message")
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        raise OcrError("Qwen returned an invalid answer message")
+    if message.get("refusal"):
+        raise OcrError("Qwen declined to process this image. Nothing copied.")
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list) and all(
+        isinstance(part, dict) and isinstance(part.get("text"), str) for part in content
+    ):
+        text = "\n".join(part["text"] for part in content)
+    else:
+        raise OcrError("Qwen returned an invalid text answer")
+    if not text.strip():
+        raise OcrError("Qwen returned an empty answer, not a no-text result. Nothing copied.")
+    return text
 
 
 def _compact_error(body: str) -> str:
@@ -294,6 +334,11 @@ def _compact_error(body: str) -> str:
     except json.JSONDecodeError:
         return body[:300]
 
+    if not isinstance(parsed, dict):
+        return body[:300]
+    if isinstance(parsed.get("message"), str):
+        code = parsed.get("code") or "Error"
+        return f"{code}: {parsed['message']}"[:300]
     error = parsed.get("error")
     if isinstance(error, dict) and isinstance(error.get("message"), str):
         return error["message"]
