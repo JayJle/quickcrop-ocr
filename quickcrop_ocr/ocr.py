@@ -16,10 +16,12 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+import httpx
 from PIL import Image
 
 from .config import RuntimeConfig
 from .layout import NO_TEXT_MARKER, format_text, get_layout
+from .transport import QwenTransport
 
 
 OCR_PROMPT = f"""You are an OCR transcription engine.
@@ -101,20 +103,22 @@ class RequestControl:
 
 
 def recognize_text(
-    image: Image.Image, config: RuntimeConfig, *, control: RequestControl | None = None
+    image: Image.Image, config: RuntimeConfig, *, control: RequestControl | None = None,
+    transport: QwenTransport | None = None,
 ) -> OcrResult:
     if not config.api_key:
         raise NoOcrBackendError("API key is not set")
 
     control = control or RequestControl()
     control.remaining()
-    result = _recognize_with_qwen(image, config, control)
+    result = _recognize_with_qwen(image, config, control, transport)
     control.remaining()
     return result
 
 
 def _recognize_with_qwen(
-    image: Image.Image, config: RuntimeConfig, control: RequestControl
+    image: Image.Image, config: RuntimeConfig, control: RequestControl,
+    transport: QwenTransport | None,
 ) -> OcrResult:
     model = config.model
     endpoint = _qwen_endpoint(config)
@@ -152,7 +156,7 @@ def _recognize_with_qwen(
         method="POST",
     )
 
-    body = _post_with_retries(request, control)
+    body = _post_with_retries(request, control, transport)
     control.on_progress("Checking Qwen result")
 
     try:
@@ -172,7 +176,12 @@ def _qwen_endpoint(config: RuntimeConfig) -> str:
         raise OcrError("Qwen region must be beijing or international") from exc
 
 
-def _post_with_retries(request: urllib.request.Request, control: RequestControl) -> str:
+def _post_with_retries(
+    request: urllib.request.Request, control: RequestControl, transport: QwenTransport | None = None,
+) -> str:
+    if transport is None:
+        with QwenTransport() as owned_transport:
+            return _post_with_retries(request, control, owned_transport)
     last_error: OcrError | None = None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -180,8 +189,8 @@ def _post_with_retries(request: urllib.request.Request, control: RequestControl)
         control.on_progress(f"Reading text with Qwen (attempt {attempt}/{MAX_ATTEMPTS})")
         delay = 0.4 * attempt
         try:
-            status, body, retry_after = _request_with_budget(request, control)
-            if status < 400:
+            status, body, retry_after = _request_with_budget(request, control, transport)
+            if 200 <= status < 300:
                 return body
             last_error = OcrError(f"Qwen HTTP {status}: {_compact_error(body)}")
             if status not in RETRYABLE_HTTP_CODES:
@@ -189,8 +198,10 @@ def _post_with_retries(request: urllib.request.Request, control: RequestControl)
             delay = _retry_delay(retry_after, delay)
         except urllib.error.URLError as exc:
             last_error = OcrError(_network_error_message(exc.reason))
-        except TimeoutError:
+        except (TimeoutError, httpx.TimeoutException):
             last_error = OcrError("Qwen request timed out")
+        except httpx.TransportError as exc:
+            last_error = OcrError(f"Qwen network error: {_network_error_message(exc)}")
         except ssl.SSLError as exc:
             last_error = OcrError(_network_error_message(exc))
         except (ConnectionResetError, OSError) as exc:
@@ -204,7 +215,7 @@ def _post_with_retries(request: urllib.request.Request, control: RequestControl)
 
 
 def _request_with_budget(
-    request: urllib.request.Request, control: RequestControl
+    request: urllib.request.Request, control: RequestControl, transport: QwenTransport,
 ) -> tuple[int, str, str | None]:
     acquired = False
     while not acquired:
@@ -217,15 +228,7 @@ def _request_with_budget(
     def send() -> None:
         try:
             timeout = min(REQUEST_TIMEOUT_SECONDS, control.remaining())
-            try:
-                with urllib.request.urlopen(request, timeout=timeout) as response:
-                    reply = (200, response.read().decode("utf-8"), None)
-            except urllib.error.HTTPError as exc:
-                with exc:
-                    reply = (
-                        exc.code, exc.read().decode("utf-8", errors="replace"),
-                        exc.headers.get("Retry-After") if exc.headers else None,
-                    )
+            reply = transport.post(request, timeout=timeout)
             replies.put((reply, None))
         except Exception as exc:
             replies.put((None, exc))
@@ -239,7 +242,7 @@ def _request_with_budget(
         _REQUEST_SLOT.release()
         raise
 
-    # urllib's timeout is per socket operation, not a total deadline. Polling here
+    # HTTPX's timeout is per socket operation, not a total deadline. Polling here
     # also lets the caller cancel DNS/connect/read without waiting for the socket.
     while True:
         remaining = control.remaining()

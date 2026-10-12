@@ -14,6 +14,7 @@ Press a global shortcut, drag over text, and the recognized text is copied to th
 - Frozen-screen crop overlay with drag selection
 - Exact region screenshot capture
 - Qwen vision OCR through Alibaba Cloud Model Studio / DashScope
+- Reusable HTTPS connection for lower latency during consecutive captures
 - Recognition of Chinese, English, mixed text, UI screenshots, and subtitles
 - Three text layouts: preserve image layout, single line, or natural paragraphs
 - Guided terminal setup with back navigation and a settings review before starting
@@ -159,6 +160,7 @@ After recognition, **Copy again** copies the most recent successful OCR result w
 
 ## Request Safety
 
+- The app lazily creates one HTTPX client per run and reuses its HTTPS connection across captures and retries. Idle connections are eligible for reuse for up to 60 seconds; expired or server-closed connections reconnect on demand. No warmup API requests are sent. Exiting closes the pool, or defers closure until an already-active socket operation finishes.
 - OCR has a **30-second total budget**, starting after selection. Each socket operation is capped at 20 seconds or the remaining budget, whichever is shorter.
 - Network failures and HTTP 408, 429, 500, 502, 503, and 504 are retried up to three attempts within that same budget. Server `Retry-After` delays are respected without extending the budget. Authentication errors are not retried.
 - Cancellation and timeout discard late results and stop further retries. A request already sent to Qwen may still complete and incur charges. A blocked socket can finish in the background; a new request waits for that connection slot, with its own visible status and time budget.
@@ -285,6 +287,7 @@ History: [Gemini migration](https://github.com/JayJle/quickcrop-ocr/commit/3b5a9
 | Problem or feedback | Change | User-facing benefit and remaining tradeoff |
 |---|---|---|
 | Too many provider and formatting options | Qwen only; Plus/Beijing/single-line defaults; back/edit/review in setup | Fewer decisions and easier correction, while still requesting the key each run; no hidden provider fallback |
+| Consecutive captures repeated connection setup | Reuse a per-run HTTPX connection pool with a 60-second idle expiry | Avoid repeated TCP/TLS handshakes on a live connection without changing the model, image encoding, or prompt; first and expired-idle requests still need a connection |
 | Text needed different layouts, not punctuation rewriting | Preserve image layout, single line, natural paragraphs; remove automatic punctuation spacing | Output suits the paste target without deliberately altering punctuation; paragraph interpretation still depends on the model |
 | The screen changed between selection and capture | Freeze the desktop before selection; upload only the crop | Recognition uses the frame the user selected, especially useful for subtitles; capture-protected black pixels remain unrecoverable |
 | Slow requests looked stuck and could accumulate retries | Persistent elapsed/retry status, cancellation, transient HTTP retries, 30-second total budget | Waiting becomes visible and bounded; this does not itself make model inference faster or cancel provider-side billing |
@@ -294,7 +297,18 @@ History: [Gemini migration](https://github.com/JayJle/quickcrop-ocr/commit/3b5a9
 
 English terminal guidance, linked English/Chinese READMEs, and separate PowerShell/CMD and Git Bash commands also addressed actual setup failures. The regression suite reached **115 passing tests** at the clipboard-fix baseline, covering these application behaviors rather than claiming real-model accuracy.
 
-**Performance evidence, not a shipped optimization:** A separate October 12 pilot left production code unchanged. Plus took 2.81 s / 5.02 s on two synthetic fixtures through the current transport, versus 1.96 s / 4.71 s in a reusable-client experiment, with only one measurement per fixture/client combination. Network and server variation prevent attributing that difference to pooling alone. Encoder changes saved only about 0.6-4 ms. Flash returned model-not-found errors, so there was no valid Plus-versus-Flash comparison. Connection reuse remains a candidate for further testing, not an implemented or guaranteed speedup.
+**Connection reuse: tested separately, then integrated.** The initial pilot suggested pooling was worth investigating; a separate October 12 experiment then completed **36 successful Qwen Plus requests** without changing production code during measurement. It compared the previous urllib path, persistent HTTPX with pooling disabled, and persistent HTTPX with pooling enabled. Two synthetic Chinese/English images each received a first request, four consecutive rounds, and a request after a 70-second pause in every arm. Request order was balanced across the full plan; model, endpoint, encoding, and prompt stayed the same. The mechanism is now integrated, with the existing cancellation, total deadline, and retry limits retained.
+
+Consecutive-request medians, four measurements per image per arm:
+
+| Synthetic image | Previous urllib | HTTPX without reuse | HTTPX with reuse | Reduction versus previous median |
+|---|---:|---:|---:|---:|
+| Plain Chinese/English text | 2.58 s | 2.60 s | 1.72 s | 0.86 s, about **33%** |
+| Colored task panel | 4.13 s | 3.86 s | 2.65 s | 1.48 s, about **36%** |
+
+**Why this is an improvement:** Reused connections avoid repeated connection setup without simplifying the transcription task. All eight consecutive paired comparisons favored reuse, with a median saving of 1.24 s versus urllib and 1.20 s versus the same HTTPX implementation with pooling disabled. Traces confirmed zero new TCP/TLS handshakes in those eight reused requests. All 18 outputs for each image were identical across the three arms; the ordinary text still had about 1.98% character error excluding whitespace, while the colored sample matched exactly. Reuse did not change the observed output, but it did not fix recognition errors either.
+
+**Limits:** The 33%/36% figures describe the consecutive phase, not all 36 requests or all screenshots. First requests showed no speed benefit. After the 70-second pause exceeded the test's 60-second keepalive expiry, connections were recreated and no consistent benefit remained. Timings include upload and full-response retrieval but exclude client initialization, image preparation, selection, and clipboard copying. These are small-sample measurements on one network; provider load and caching can still affect results. Encoding changes saved only about 0.6-4 ms, so encoding and the default model were left unchanged. Flash model-not-found errors from a separate investigation provide no valid model-speed comparison.
 
 History: [Qwen workflow and reliability](https://github.com/JayJle/quickcrop-ocr/commit/f114e0a), [Chinese README](https://github.com/JayJle/quickcrop-ocr/commit/554d05d), [terminal-specific commands](https://github.com/JayJle/quickcrop-ocr/commit/588a45b), [clipboard regression fix](https://github.com/JayJle/quickcrop-ocr/commit/2237d0b).
 
@@ -315,5 +329,7 @@ Run the offline regression tests from the project folder.
 ```
 
 With an already configured active Python environment, use `python -m unittest discover -v` instead. The tests do not need a real API key or make paid OCR requests.
+
+Connection tests additionally use a localhost HTTP server to verify actual TCP reuse, idle expiry, server-closed reconnection, and production OCR routing. Mocked transport tests cover per-request credentials, Windows proxy routing, response cleanup, shutdown during an active read, and HTTPX network errors within the existing retry budget.
 
 The tests use synthetic images, mocked API responses, and a simulated clipboard. Windows-only memory tests verify Unicode allocation and duplication without reading or changing the system clipboard. Coverage includes setup navigation and review, invalid input, key redaction, real CLI entry-point cancellation, all three layout choices, punctuation preservation, request prompt routing, truncated/rejected answers, cancellation, total deadlines, early timer wakeups, HTTP retries, late responses, clipboard recovery, hotkey lifecycle, and frozen-image cropping across negative monitor coordinates. Layout tests verify instructions and response handling, not the model's accuracy on real images. A live capture still needs to be checked with your own Qwen key and desktop.

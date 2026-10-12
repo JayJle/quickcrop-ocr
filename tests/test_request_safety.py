@@ -1,8 +1,6 @@
-import io
 import threading
 import time
 import unittest
-import urllib.error
 import urllib.request
 from unittest.mock import Mock, patch
 
@@ -61,13 +59,10 @@ class RequestBudgetTests(unittest.TestCase):
             progress = Mock()
             control = RequestControl(on_progress=progress)
             control.wait = Mock()
-            error = urllib.error.HTTPError(
-                self.request.full_url, code, "Temporary", {"Retry-After": "2"},
-                io.BytesIO(b'{"code":"Temporary","message":"Try again"}'),
-            )
+            error = (code, '{"code":"Temporary","message":"Try again"}', "2")
             with self.subTest(code=code), patch(
-                "quickcrop_ocr.ocr.urllib.request.urlopen",
-                side_effect=[error, io.BytesIO(b"success")],
+                "quickcrop_ocr.ocr.QwenTransport.post",
+                side_effect=[error, (200, "success", None)],
             ) as send:
                 self.assertEqual(_post_with_retries(self.request, control), "success")
             self.assertEqual(send.call_count, 2)
@@ -75,7 +70,7 @@ class RequestBudgetTests(unittest.TestCase):
             self.assertTrue(any("Retrying 2/3" in c.args[0] for c in progress.call_args_list))
 
     def test_authentication_errors_do_not_retry(self):
-        for code in (400, 401, 403):
+        for code in (301, 302, 307, 400, 401, 403):
             control = RequestControl()
             control.wait = Mock()
             with self.subTest(code=code), patch(
@@ -113,7 +108,7 @@ class RequestBudgetTests(unittest.TestCase):
     def test_pre_canceled_request_does_not_send(self):
         control = RequestControl()
         control.cancel_event.set()
-        with patch("quickcrop_ocr.ocr.urllib.request.urlopen") as send:
+        with patch("quickcrop_ocr.ocr.QwenTransport.post") as send:
             with self.assertRaises(OcrCancelled):
                 _post_with_retries(self.request, control)
         send.assert_not_called()
@@ -127,11 +122,11 @@ class RequestBudgetTests(unittest.TestCase):
             def blocked_send(*_args, **_kwargs):
                 entered.set()
                 release.wait(2)
-                return io.BytesIO(b"late reply")
+                return (200, "late reply", None)
 
             timer = threading.Timer(0.04, control.cancel_event.set) if cancel else None
             with self.subTest(cancel=cancel), patch(
-                "quickcrop_ocr.ocr.urllib.request.urlopen", side_effect=blocked_send
+                "quickcrop_ocr.ocr.QwenTransport.post", side_effect=blocked_send
             ):
                 try:
                     if timer:
@@ -153,7 +148,7 @@ class RequestBudgetTests(unittest.TestCase):
     def test_waiting_for_previous_socket_is_also_budgeted(self):
         _REQUEST_SLOT.acquire()
         try:
-            with patch("quickcrop_ocr.ocr.urllib.request.urlopen") as send:
+            with patch("quickcrop_ocr.ocr.QwenTransport.post") as send:
                 with self.assertRaises(OcrTimeout):
                     _post_with_retries(self.request, RequestControl(timeout=0.03))
             send.assert_not_called()
@@ -161,7 +156,7 @@ class RequestBudgetTests(unittest.TestCase):
             _REQUEST_SLOT.release()
 
     def test_socket_timeout_is_capped_by_remaining_budget(self):
-        with patch("quickcrop_ocr.ocr.urllib.request.urlopen", return_value=io.BytesIO(b"ok")) as send:
+        with patch("quickcrop_ocr.ocr.QwenTransport.post", return_value=(200, "ok", None)) as send:
             _post_with_retries(self.request, RequestControl(timeout=1))
         self.assertLessEqual(send.call_args.kwargs["timeout"], 1)
         self.assertGreater(send.call_args.kwargs["timeout"], 0)

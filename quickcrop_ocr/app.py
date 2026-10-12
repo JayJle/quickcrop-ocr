@@ -17,6 +17,7 @@ from .hotkey import Hotkey, HotkeyRegistrationError
 from .layout import NO_TEXT_MARKER
 from .ocr import OcrCancelled, OcrError, OcrResult, RequestControl, recognize_text
 from .overlay import SelectionOverlay
+from .transport import QwenTransport
 
 
 def enable_dpi_awareness() -> None:
@@ -59,6 +60,7 @@ class QuickCropApp:
             self.root, on_capture=self._on_capture, on_error=self._on_capture_error
         )
         self.clipboard = ClipboardWriter()
+        self.transport = QwenTransport()
         self.status = StatusWindow(self.root, self._cancel_operation, self._copy_last)
         self.ocr_thread: threading.Thread | None = None
         self.is_capturing = False
@@ -93,6 +95,7 @@ class QuickCropApp:
             self.control.cancel_event.set()
         self.control = None
         self.copy_generation += 1
+        self.transport.close()
         self.hotkey.stop()
         self.overlay.close()
         self.status.close()
@@ -216,7 +219,7 @@ class QuickCropApp:
 
     def _recognize_in_background(self, image: Image.Image, job_id: int, control: RequestControl) -> None:
         try:
-            result = recognize_text(image, self.config.runtime, control=control)
+            result = recognize_text(image, self.config.runtime, control=control, transport=self.transport)
         except OcrCancelled:
             self.events.put(UiEvent("canceled", job_id))
         except OcrError as exc:

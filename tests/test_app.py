@@ -15,6 +15,7 @@ from quickcrop_ocr.config import RuntimeConfig, SetupCancelled
 from quickcrop_ocr.hotkey import HotkeyRegistrationError
 from quickcrop_ocr.layout import TEXT_LAYOUTS
 from quickcrop_ocr.ocr import OcrError, OcrResult, RequestControl
+from quickcrop_ocr.transport import QwenTransport
 
 
 def make_app():
@@ -26,6 +27,7 @@ def make_app():
     app.status = Mock()
     app.overlay = Mock()
     app.clipboard = Mock()
+    app.transport = QwenTransport()
     app.hotkey = Mock()
     app.ocr_thread = None
     app.is_capturing = False
@@ -46,6 +48,7 @@ class AppFlowTests(unittest.TestCase):
         self.output.__enter__()
 
     def tearDown(self):
+        self.app.transport.close()
         self.output.__exit__(None, None, None)
 
     def test_success_keeps_exact_text_and_allows_copy_again(self):
@@ -108,8 +111,9 @@ class AppFlowTests(unittest.TestCase):
     def test_worker_only_queues_events_and_never_calls_tk(self):
         image = Image.new("RGB", (10, 10))
         result = OcrResult("recognized", "qwen:test")
-        with patch("quickcrop_ocr.app.recognize_text", return_value=result):
+        with patch("quickcrop_ocr.app.recognize_text", return_value=result) as recognize:
             self.app._recognize_in_background(image, 1, RequestControl())
+        self.assertIs(recognize.call_args.kwargs["transport"], self.app.transport)
         self.assertEqual(self.app.root.mock_calls, [])
         self.assertEqual(self.app.events.get_nowait(), UiEvent("result", 1, result))
         with self.assertRaises(ValueError):
@@ -171,12 +175,14 @@ class AppFlowTests(unittest.TestCase):
 
     def test_stop_cancels_active_work_and_is_idempotent(self):
         control = self.app.control = RequestControl()
+        self.app.transport = Mock()
         self.app.stop()
         self.app.stop()
         self.app._drain_events()
         self.assertTrue(control.cancel_event.is_set())
         self.app.root.destroy.assert_called_once()
         self.app.root.after.assert_not_called()
+        self.app.transport.close.assert_called_once()
 
     def test_capture_to_response_to_copy_pipeline(self):
         text = "    Heading:\n\nParagraph!\n\n- List item: 3.14\n"
@@ -189,13 +195,14 @@ class AppFlowTests(unittest.TestCase):
                     "message": {"role": "assistant", "content": [{"text": text}]},
                 }]}}
                 with self.subTest(mode=mode, reason=reason), patch(
-                    "quickcrop_ocr.ocr.urllib.request.urlopen",
-                    return_value=io.BytesIO(json.dumps(payload).encode()),
+                    "quickcrop_ocr.ocr.QwenTransport.post",
+                    return_value=(200, json.dumps(payload), None),
                 ):
                     app._on_capture(Image.new("RGB", (10, 10)))
                     app.ocr_thread.join(timeout=2)
                     self.assertFalse(app.ocr_thread.is_alive())
                     app._drain_events()
+                app.transport.close()
                 if reason == "stop":
                     expected = " ".join(text.split()) if mode == "single_line" else text
                     app.clipboard.copy.assert_called_once_with(expected, 123)
