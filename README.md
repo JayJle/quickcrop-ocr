@@ -6,6 +6,8 @@ QuickCrop OCR is a lightweight Windows desktop utility for copying text from a c
 
 Press a global shortcut, drag over text, and the recognized text is copied to the clipboard for immediate pasting.
 
+[Project evolution: three major iterations](#evolution-three-major-iterations)
+
 ## Features
 
 - Global hotkey: `Ctrl+Shift+X`
@@ -251,6 +253,50 @@ If OCR is inaccurate:
 ## Project Status
 
 This is a personal-use MVP optimized for quick hosted vision OCR on Windows.
+
+## Evolution: Three Major Iterations
+
+These are development milestones, not tagged releases. They summarize the actual user feedback and Git history from June to October 2026. Improvements below describe changed behavior and observed results, not a controlled accuracy or speed comparison across all historical versions. Historical providers and settings are not supported by the current app.
+
+### Iteration 1: Make Screen Text Copyable (June 2026)
+
+**Why:** The original need was simple: select visible text and paste it elsewhere without retyping. Early use exposed Chinese recognition problems and poor results on decorative or low-contrast backgrounds, even when clean English text worked.
+
+**What changed:** The Windows MVP connected a global hotkey, region selection, Tesseract, and clipboard copying, with an optional OpenAI vision route. Chinese language-data setup, Chinese-first language ordering, and mixed-language token joining addressed local OCR setup and spacing problems. Preprocessing expanded to grayscale, thresholded, inverted, and color candidates. When trying many candidates made recognition too slow, the default local path was reduced to one preprocessing variant and one page-segmentation setting.
+
+**Result and why it helped:** The capture-to-copy workflow became usable for clean Chinese/English text. Reducing repeated Tesseract runs removed work from the common path rather than making users wait for every candidate. The tradeoff remained: local OCR avoided network latency, but more preprocessing did not reliably solve stylized screenshots, and exposing multiple speed/accuracy modes made setup harder. No historical benchmark establishes a percentage improvement.
+
+History: [initial MVP](https://github.com/JayJle/quickcrop-ocr/commit/8db6928), [preprocessing](https://github.com/JayJle/quickcrop-ocr/commit/a9a1394), [fast defaults](https://github.com/JayJle/quickcrop-ocr/commit/3da5f11).
+
+### Iteration 2: Move to Hosted Vision and Guided Setup (June 2026)
+
+**Why:** The user wanted better transcription of real screenshots without tuning many local modes. OpenAI requests encountered a quota error, so the workflow moved to Gemini; later, Qwen was added as an explicitly selected alternative. This was a response to access and usability problems, not proof that one provider was always faster or more accurate.
+
+**What changed:** Hosted vision replaced the local preprocessing workflow. Gemini network/TLS failures gained retry handling. The delayed Tkinter error callback was fixed so it displayed the underlying OCR error instead of raising a second exception about the expired `exc` variable. Startup became an interactive terminal flow for provider, model, key, Qwen region, and output layout, with no automatic provider fallback. Keys were requested each run; visible entry addressed the user's difficulty with hidden input. Beijing/Singapore selection addressed region-mismatched Qwen requests.
+
+**Result and why it helped:** Users could configure OCR without remembering shell-specific environment-variable commands, and transient connection failures no longer always required starting over manually. Preserved-layout and single-line output served different paste targets. The new costs were network waiting, API availability/charges, and uploading the selected crop. Provider choices and an optional punctuation-spacing feature also added complexity; visible keys could remain in terminal scrollback. Those tradeoffs informed the next iteration.
+
+History: [Gemini migration](https://github.com/JayJle/quickcrop-ocr/commit/3b5a974), [network retries](https://github.com/JayJle/quickcrop-ocr/commit/fe557e5), [interactive provider setup](https://github.com/JayJle/quickcrop-ocr/commit/508bca1).
+
+### Iteration 3: Simplify to Qwen and Make the Workflow Dependable (October 2026, Current)
+
+**Why:** Recognition alone was not enough. A disappearing progress message made slow requests look frozen; moving subtitles could change before capture; failed copying could lose clipboard data. The user also wanted fewer settings and faithful punctuation rather than automatic rewriting.
+
+| Problem or feedback | Change | User-facing benefit and remaining tradeoff |
+|---|---|---|
+| Too many provider and formatting options | Qwen only; Plus/Beijing/single-line defaults; back/edit/review in setup | Fewer decisions and easier correction, while still requesting the key each run; no hidden provider fallback |
+| Text needed different layouts, not punctuation rewriting | Preserve image layout, single line, natural paragraphs; remove automatic punctuation spacing | Output suits the paste target without deliberately altering punctuation; paragraph interpretation still depends on the model |
+| The screen changed between selection and capture | Freeze the desktop before selection; upload only the crop | Recognition uses the frame the user selected, especially useful for subtitles; capture-protected black pixels remain unrecoverable |
+| Slow requests looked stuck and could accumulate retries | Persistent elapsed/retry status, cancellation, transient HTTP retries, 30-second total budget | Waiting becomes visible and bounded; this does not itself make model inference faster or cancel provider-side billing |
+| Copy failures could destroy data or require another OCR request | Allocate before clearing, best-effort backup/recovery, bounded copy retries, retain result for Copy again | Copy can be retried without another upload or model call; full restoration is not guaranteed |
+| A new backup safeguard blocked copying when old clipboard formats were unreadable | Skip unreadable/unsupported backup formats instead of rejecting every copy | Fixes the reported "Could not read previous clipboard data" regression; skipped formats cannot be recovered after a failed write |
+| Worker callbacks and incomplete answers could create misleading UI results | Queue worker events to the UI thread; reject stale, truncated, refused, malformed, and empty answers | Canceled work cannot later overwrite the clipboard; completion checks still cannot detect every transcription error |
+
+English terminal guidance, linked English/Chinese READMEs, and separate PowerShell/CMD and Git Bash commands also addressed actual setup failures. The regression suite reached **115 passing tests** at the clipboard-fix baseline, covering these application behaviors rather than claiming real-model accuracy.
+
+**Performance evidence, not a shipped optimization:** A separate October 12 pilot left production code unchanged. Plus took 2.81 s / 5.02 s on two synthetic fixtures through the current transport, versus 1.96 s / 4.71 s in a reusable-client experiment, with only one measurement per fixture/client combination. Network and server variation prevent attributing that difference to pooling alone. Encoder changes saved only about 0.6-4 ms. Flash returned model-not-found errors, so there was no valid Plus-versus-Flash comparison. Connection reuse remains a candidate for further testing, not an implemented or guaranteed speedup.
+
+History: [Qwen workflow and reliability](https://github.com/JayJle/quickcrop-ocr/commit/f114e0a), [Chinese README](https://github.com/JayJle/quickcrop-ocr/commit/554d05d), [terminal-specific commands](https://github.com/JayJle/quickcrop-ocr/commit/588a45b), [clipboard regression fix](https://github.com/JayJle/quickcrop-ocr/commit/2237d0b).
 
 ## Tests
 
