@@ -258,59 +258,31 @@ This is a personal-use MVP optimized for quick hosted vision OCR on Windows.
 
 ## Evolution: Three Major Iterations
 
-These are development milestones, not tagged releases. They summarize the actual user feedback and Git history from June to October 2026. Improvements below describe changed behavior and observed results, not a controlled accuracy or speed comparison across all historical versions. Historical providers and settings are not supported by the current app.
+### Iteration 1: Local OCR Prototype
 
-### Iteration 1: Make Screen Text Copyable (June 2026)
+Connected hotkey selection, Tesseract recognition, and automatic clipboard copying.
 
-**Why:** The original need was simple: select visible text and paste it elsewhere without retyping. Early use exposed Chinese recognition problems and poor results on decorative or low-contrast backgrounds, even when clean English text worked.
+- **Chinese and English support:** Improved language setup and mixed-text joining to address unavailable Chinese recognition and unwanted spaces.
+- **Image preprocessing:** Added grayscale and thresholding for low-contrast input, while complex styles remained a limitation.
+- **Faster local defaults:** Reduced preprocessing candidates and repeated recognition runs to shorten waiting time.
 
-**What changed:** The Windows MVP connected a global hotkey, region selection, Tesseract, and clipboard copying, with an optional OpenAI vision route. Chinese language-data setup, Chinese-first language ordering, and mixed-language token joining addressed local OCR setup and spacing problems. Preprocessing expanded to grayscale, thresholded, inverted, and color candidates. When trying many candidates made recognition too slow, the default local path was reduced to one preprocessing variant and one page-segmentation setting.
+### Iteration 2: Hosted Vision OCR
 
-**Result and why it helped:** The capture-to-copy workflow became usable for clean Chinese/English text. Reducing repeated Tesseract runs removed work from the common path rather than making users wait for every candidate. The tradeoff remained: local OCR avoided network latency, but more preprocessing did not reliably solve stylized screenshots, and exposing multiple speed/accuracy modes made setup harder. No historical benchmark establishes a percentage improvement.
+Moved to hosted vision models and added interactive terminal setup for Gemini / Qwen.
 
-History: [initial MVP](https://github.com/JayJle/quickcrop-ocr/commit/8db6928), [preprocessing](https://github.com/JayJle/quickcrop-ocr/commit/a9a1394), [fast defaults](https://github.com/JayJle/quickcrop-ocr/commit/3da5f11).
+- **Replaced local processing modes:** Let vision models handle screenshots, reducing the need to tune preprocessing manually.
+- **Guided configuration:** Prompted for model, region, and API key in the terminal, making setup easier and reducing region-mismatch errors.
+- **Better failure handling:** Retried transient network failures and fixed the error-display callback, reducing manual retries and showing the actual failure.
 
-### Iteration 2: Move to Hosted Vision and Guided Setup (June 2026)
+### Iteration 3: Qwen Simplification and Performance (Current)
 
-**Why:** The user wanted better transcription of real screenshots without tuning many local modes. OpenAI requests encountered a quota error, so the workflow moved to Gemini; later, Qwen was added as an explicitly selected alternative. This was a response to access and usability problems, not proof that one provider was always faster or more accurate.
+Standardized on Qwen, improved the capture-to-copy experience, and reused connections to reduce consecutive-request latency.
 
-**What changed:** Hosted vision replaced the local preprocessing workflow. Gemini network/TLS failures gained retry handling. The delayed Tkinter error callback was fixed so it displayed the underlying OCR error instead of raising a second exception about the expired `exc` variable. Startup became an interactive terminal flow for provider, model, key, Qwen region, and output layout, with no automatic provider fallback. Keys were requested each run; visible entry addressed the user's difficulty with hidden input. Beijing/Singapore selection addressed region-mismatched Qwen requests.
-
-**Result and why it helped:** Users could configure OCR without remembering shell-specific environment-variable commands, and transient connection failures no longer always required starting over manually. Preserved-layout and single-line output served different paste targets. The new costs were network waiting, API availability/charges, and uploading the selected crop. Provider choices and an optional punctuation-spacing feature also added complexity; visible keys could remain in terminal scrollback. Those tradeoffs informed the next iteration.
-
-History: [Gemini migration](https://github.com/JayJle/quickcrop-ocr/commit/3b5a974), [network retries](https://github.com/JayJle/quickcrop-ocr/commit/fe557e5), [interactive provider setup](https://github.com/JayJle/quickcrop-ocr/commit/508bca1).
-
-### Iteration 3: Simplify to Qwen and Make the Workflow Dependable (October 2026, Current)
-
-**Why:** Recognition alone was not enough. A disappearing progress message made slow requests look frozen; moving subtitles could change before capture; failed copying could lose clipboard data. The user also wanted fewer settings and faithful punctuation rather than automatic rewriting.
-
-| Problem or feedback | Change | User-facing benefit and remaining tradeoff |
-|---|---|---|
-| Too many provider and formatting options | Qwen only; Plus/Beijing/single-line defaults; back/edit/review in setup | Fewer decisions and easier correction, while still requesting the key each run; no hidden provider fallback |
-| Consecutive captures repeated connection setup | Reuse a per-run HTTPX connection pool with a 60-second idle expiry | Avoid repeated TCP/TLS handshakes on a live connection without changing the model, image encoding, or prompt; first and expired-idle requests still need a connection |
-| Text needed different layouts, not punctuation rewriting | Preserve image layout, single line, natural paragraphs; remove automatic punctuation spacing | Output suits the paste target without deliberately altering punctuation; paragraph interpretation still depends on the model |
-| The screen changed between selection and capture | Freeze the desktop before selection; upload only the crop | Recognition uses the frame the user selected, especially useful for subtitles; capture-protected black pixels remain unrecoverable |
-| Slow requests looked stuck and could accumulate retries | Persistent elapsed/retry status, cancellation, transient HTTP retries, 30-second total budget | Waiting becomes visible and bounded; this does not itself make model inference faster or cancel provider-side billing |
-| Copy failures could destroy data or require another OCR request | Allocate before clearing, best-effort backup/recovery, bounded copy retries, retain result for Copy again | Copy can be retried without another upload or model call; full restoration is not guaranteed |
-| A new backup safeguard blocked copying when old clipboard formats were unreadable | Skip unreadable/unsupported backup formats instead of rejecting every copy | Fixes the reported "Could not read previous clipboard data" regression; skipped formats cannot be recovered after a failed write |
-| Worker callbacks and incomplete answers could create misleading UI results | Queue worker events to the UI thread; reject stale, truncated, refused, malformed, and empty answers | Canceled work cannot later overwrite the clipboard; completion checks still cannot detect every transcription error |
-
-English terminal guidance, linked English/Chinese READMEs, and separate PowerShell/CMD and Git Bash commands also addressed actual setup failures. The regression suite reached **115 passing tests** at the clipboard-fix baseline, covering these application behaviors rather than claiming real-model accuracy.
-
-**Connection reuse: tested separately, then integrated.** The initial pilot suggested pooling was worth investigating; a separate October 12 experiment then completed **36 successful Qwen Plus requests** without changing production code during measurement. It compared the previous urllib path, persistent HTTPX with pooling disabled, and persistent HTTPX with pooling enabled. Two synthetic Chinese/English images each received a first request, four consecutive rounds, and a request after a 70-second pause in every arm. Request order was balanced across the full plan; model, endpoint, encoding, and prompt stayed the same. The mechanism is now integrated, with the existing cancellation, total deadline, and retry limits retained.
-
-Consecutive-request medians, four measurements per image per arm:
-
-| Synthetic image | Previous urllib | HTTPX without reuse | HTTPX with reuse | Reduction versus previous median |
-|---|---:|---:|---:|---:|
-| Plain Chinese/English text | 2.58 s | 2.60 s | 1.72 s | 0.86 s, about **33%** |
-| Colored task panel | 4.13 s | 3.86 s | 2.65 s | 1.48 s, about **36%** |
-
-**Why this is an improvement:** Reused connections avoid repeated connection setup without simplifying the transcription task. All eight consecutive paired comparisons favored reuse, with a median saving of 1.24 s versus urllib and 1.20 s versus the same HTTPX implementation with pooling disabled. Traces confirmed zero new TCP/TLS handshakes in those eight reused requests. All 18 outputs for each image were identical across the three arms; the ordinary text still had about 1.98% character error excluding whitespace, while the colored sample matched exactly. Reuse did not change the observed output, but it did not fix recognition errors either.
-
-**Limits:** The 33%/36% figures describe the consecutive phase, not all 36 requests or all screenshots. First requests showed no speed benefit. After the 70-second pause exceeded the test's 60-second keepalive expiry, connections were recreated and no consistent benefit remained. Timings include upload and full-response retrieval but exclude client initialization, image preparation, selection, and clipboard copying. These are small-sample measurements on one network; provider load and caching can still affect results. Encoding changes saved only about 0.6-4 ms, so encoding and the default model were left unchanged. Flash model-not-found errors from a separate investigation provide no valid model-speed comparison.
-
-History: [Qwen workflow and reliability](https://github.com/JayJle/quickcrop-ocr/commit/f114e0a), [Chinese README](https://github.com/JayJle/quickcrop-ocr/commit/554d05d), [terminal-specific commands](https://github.com/JayJle/quickcrop-ocr/commit/588a45b), [clipboard regression fix](https://github.com/JayJle/quickcrop-ocr/commit/2237d0b).
+- **Simpler setup and layouts:** Default to Plus, Beijing, and single-line output; offer original layout, single line, or natural paragraphs without automatically adding spaces after punctuation.
+- **Freeze before selection:** Recognize the frame the user selected, avoiding mismatches caused by moving subtitles or animations.
+- **Visible, cancelable waiting:** Keep progress and retry status visible with a 30-second total budget, so slow requests do not look frozen.
+- **Recoverable copy failures:** Retain results for another copy attempt, back up and restore the clipboard where possible, and fix unreadable old formats blocking copying, reducing repeat OCR calls.
+- **Connection reuse:** Avoid repeated connection setup; in a 36-request live experiment, consecutive-request medians for two sample images fell by about **33% / 36%** versus the previous approach, with identical outputs. First requests and requests after long idle periods are not guaranteed to improve.
 
 ## Tests
 
